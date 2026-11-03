@@ -1,0 +1,10 @@
+{
+  "name": "context-memory",
+  "description": "Persistent memory and cross-session recall for Claude Code: remembers decisions, preferences and todos between sessions, writes an automatic handoff before compaction and at session end, restores it at session start, and lets Claude search, read and extract information from other (also currently open) conversations stored in ~/.claude/projects.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Piekarnia Galicyjska"
+  },
+  "license": "MIT",
+  "keywords": ["memory", "context", "recall", "sessions", "handoff", "transcripts", "conversation-search"]
+}

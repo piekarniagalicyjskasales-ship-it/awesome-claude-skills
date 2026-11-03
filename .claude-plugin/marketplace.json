@@ -9,6 +9,12 @@
   },
   "plugins": [
     {
+      "name": "context-memory",
+      "description": "Persistent memory across Claude Code sessions (decisions, preferences, todos, automatic handoff before compaction) and recall of information from other conversations, including sessions open right now in other windows.",
+      "source": "./context-memory",
+      "category": "productivity-organization"
+    },
+    {
       "name": "brand-guidelines",
       "description": "Applies Anthropic's official brand colors and typography to artifacts for consistent visual identity and professional design standards.",
       "source": "./brand-guidelines",

@@ -91,3 +91,12 @@ Aby dodać nowy skill: skopiuj jego folder (z plikiem `SKILL.md`) do `.claude/sk
 | `vue-expert-js` | Creates Vue 3 components, builds vanilla JS composables, configures Vite projects, and sets up routing and state management using JavaScript only — no TypeScript. |
 | `websocket-engineer` | Use when building real-time communication systems with WebSockets or Socket.IO. |
 | `wordpress-pro` | Develops custom WordPress themes and plugins, creates and registers Gutenberg blocks and block patterns, configures WooCommerce stores, implements WordPress REST API endpoints, app… |
+
+## Context Memory — pamięć między sesjami i czytanie innych rozmów
+
+Źródło: własny plugin [`context-memory/`](./context-memory/) · licencja MIT · czysty Python (stdlib), działa lokalnie. Pełny opis i instalacja hooków: [context-memory/README.md](./context-memory/README.md). Komendy: `/sessions`, `/recall`, `/remember`, `/handoff`, `/resume`.
+
+| Skill | Opis |
+|---|---|
+| `context-memory` | Trwałe notatki (decyzje, preferencje, fakty, todo) w `~/.claude/memory` i `~/.claude/projects/<projekt>/memory`, automatyczny handoff przed kompaktowaniem i na koniec sesji, przywracany przez hook `SessionStart`. |
+| `session-recall` | Przeszukiwanie, czytanie i ekstrakcja informacji (prompty, zmienione pliki, komendy, ostatnia odpowiedź) z transkryptów wszystkich sesji Claude Code, w tym otwartych teraz w innych oknach. |
