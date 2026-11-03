@@ -23,4 +23,7 @@
 - Decyzja: przy utworzeniu członkostwa last_read = MAX(id) w kanale — dlaczego: dołączający nie powinien widzieć historii jako nieprzeczytanej (test unread); koszt pomyłki: niski. Poprawkę robi wykonawca T1.
 - Decyzja: wysłanie wiadomości najwyższego poziomu przesuwa last_read nadawcy — dlaczego: piszący widział kanał; test :639 zostaje. Koszt: niski.
 | T5 E2E przeglądarka | DONE_WITH_CONCERNS | out/T5.md, out/shots/ | 15/15 PASS, 0 błędów konsoli, dostarczenie 68 ms; drobne: throttle typing nie resetowany po wysłaniu (app.js makeComposer) |
-| T6 Recenzja niezależna | W TOKU (fala 2) | out/T6.md | opus, równolegle z T5 (tylko odczyt) |
+| T6 Recenzja niezależna | DONE | out/T6.md | Krytyczne 0, Ważne 5 (4 potw.), Drobne 19; kryteria 1–6 spełnione z zastrzeżeniami |
+| R1 Poprawki po recenzji | W TOKU (runda 1/3) | briefs/R1.md | backend W1–W5,D1,3,4,6–10,17–19; frontend D12–16+CSP; testy regresji — równolegle przez wznowionych wykonawców |
+
+- Decyzja: odłożone D2 (kwota plików), D5 (wygasanie sesji/hash tokenów), D11 (token w URL WS, wymóg kontraktu) — opisane w README jako znane ograniczenia; dlaczego: niski wpływ dla wersji lokalnej/demo; koszt: średni przy wdrożeniu publicznym.
