@@ -290,6 +290,10 @@ function createRouter({ m, rt, db, uploadsDir }) {
     const id = Number(m.run(
       'INSERT INTO messages (channel_id, user_id, parent_id, text, file_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       row.id, req.me, parentId, text, fileId, now()).lastInsertRowid);
+    if (parentId === null) {
+      m.run(`UPDATE channel_members SET last_read_message_id = MAX(last_read_message_id, ?)
+             WHERE channel_id = ? AND user_id = ?`, id, row.id, req.me);
+    }
     const message = m.getMessage(id);
     rt.sendMembers(row.id, { type: 'message.created', message });
     if (parentId) rt.sendMembers(row.id, { type: 'message.updated', message: m.getMessage(parentId) });
