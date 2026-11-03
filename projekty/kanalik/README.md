@@ -95,3 +95,19 @@ Połączenie: `ws://host/ws?token=<token>` (zły token: zamknięcie kodem 4001).
 | klient -> serwer | `{type:"typing", channelId, parentId?}`, `{type:"ping"}` |
 
 Zdarzenia kanałowe trafiają wyłącznie do członków danego kanału.
+
+## Bezpieczeństwo i znane ograniczenia
+
+Zabezpieczenia:
+
+- limit nieudanych logowań: 10 prób w 10 minut na parę IP + nazwa użytkownika, potem 429 (także dla poprawnego hasła); udane logowanie zeruje licznik; hasła haszowane asynchronicznie (scrypt), maks. 200 znaków
+- Content-Security-Policy (`script-src 'self'`, `frame-ancestors 'none'` itd.), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`; pliki użytkowników są serwowane z własnym CSP `sandbox`
+- heartbeat WebSocket (ping co 30 s, brak odpowiedzi = zamknięcie połączenia), limit ramki 16 KB, wylogowanie zamyka otwarte połączenia WS tego tokenu
+- limit JSON 100 kB (8 MB tylko dla wysyłania plików)
+
+Znane ograniczenia (poza zakresem tej wersji):
+
+- brak kwoty plików na użytkownika i sprzątania plików-sierot (usunięta wiadomość nie usuwa pliku); w produkcji: limit dysku na konto i okresowe sprzątanie
+- sesje nie wygasają, a tokeny leżą w bazie jawnym tekstem; w produkcji: przechowywać `sha256(token)` i dodać TTL
+- token w adresie URL WebSocket (`/ws?token=`) może trafić do logów proxy; w produkcji: jednorazowy bilet lub wiadomość `auth` po połączeniu
+- limiter logowań działa w pamięci jednego procesu (nie przeżywa restartu ani nie działa między instancjami)

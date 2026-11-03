@@ -1,9 +1,10 @@
 'use strict';
 const express = require('express');
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { hashPassword, verifyPassword, verifyDummy, newToken } = require('./auth');
+const { hashPasswordAsync, verifyPasswordAsync, verifyDummy, createLoginLimiter, newToken } = require('./auth');
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -27,6 +28,7 @@ const now = () => new Date().toISOString();
 
 function createRouter({ m, rt, db, uploadsDir }) {
   const api = express.Router();
+  const limiter = createLoginLimiter();
 
   function addMember(channelId, userId) {
     const last = m.get('SELECT COALESCE(MAX(id), 0) AS mx FROM messages WHERE channel_id = ?', channelId).mx;
@@ -54,13 +56,15 @@ function createRouter({ m, rt, db, uploadsDir }) {
     return token;
   }
 
-  api.post('/auth/register', (req, res) => {
+  api.post('/auth/register', async (req, res, next) => {
+   try {
     const b = req.body || {};
-    const username = str(b.username);
+    const username = str(b.username) === null ? null : str(b.username).trim().toLowerCase();
     const password = str(b.password);
     if (!username || !USERNAME_RE.test(username))
       throw bad('Nazwa użytkownika: 3–20 znaków (małe litery, cyfry, _ i .)');
     if (!password || password.length < 6) throw bad('Hasło musi mieć co najmniej 6 znaków');
+    if (password.length > 200) throw bad('Hasło może mieć maksymalnie 200 znaków');
     let displayName = username;
     if (b.displayName !== undefined && b.displayName !== null) {
       displayName = str(b.displayName);
@@ -68,7 +72,8 @@ function createRouter({ m, rt, db, uploadsDir }) {
       if (displayName.length < 1 || displayName.length > 40) throw bad('Nazwa wyświetlana: 1–40 znaków');
     }
     if (m.get('SELECT 1 FROM users WHERE username = ?', username)) throw new HttpError(409, 'Nazwa użytkownika jest zajęta');
-    const { salt, hash } = hashPassword(password);
+    const { salt, hash } = await hashPasswordAsync(password);
+    if (m.get('SELECT 1 FROM users WHERE username = ?', username)) throw new HttpError(409, 'Nazwa użytkownika jest zajęta');
     const id = Number(m.run(
       'INSERT INTO users (username, password_hash, salt, display_name, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       username, hash, salt, displayName, '', now()).lastInsertRowid);
@@ -80,24 +85,33 @@ function createRouter({ m, rt, db, uploadsDir }) {
     rt.sendAll({ type: 'user.updated', user });
     for (const c of defaults) rt.sendMembers(c.id, { type: 'channel.member_joined', channelId: c.id, user }, id);
     res.status(201).json({ token: createSession(id), user });
+   } catch (e) { next(e); }
   });
 
-  api.post('/auth/login', (req, res) => {
-    const b = req.body || {};
-    const username = str(b.username);
-    const password = str(b.password);
-    if (!username || !password) throw new HttpError(401, 'Nieprawidłowa nazwa użytkownika lub hasło');
-    const row = m.get('SELECT * FROM users WHERE username = ?', username.trim().toLowerCase());
-    if (!row) { verifyDummy(password); throw new HttpError(401, 'Nieprawidłowa nazwa użytkownika lub hasło'); }
-    if (!verifyPassword(password, row.salt, row.password_hash))
-      throw new HttpError(401, 'Nieprawidłowa nazwa użytkownika lub hasło');
-    res.json({ token: createSession(row.id), user: m.userOut(row) });
+  api.post('/auth/login', async (req, res, next) => {
+    try {
+      const b = req.body || {};
+      const username = str(b.username);
+      const password = str(b.password);
+      const fail = () => new HttpError(401, 'Nieprawidłowa nazwa użytkownika lub hasło');
+      if (!username || !password) throw fail();
+      const uname = username.trim().toLowerCase();
+      const key = req.ip + ':' + uname;
+      if (limiter.blocked(key)) throw new HttpError(429, 'Zbyt wiele prób logowania. Spróbuj za kilka minut.');
+      if (password.length > 200) { limiter.fail(key); throw fail(); }
+      const row = m.get('SELECT * FROM users WHERE username = ?', uname);
+      if (!row) { await verifyDummy(password); limiter.fail(key); throw fail(); }
+      if (!(await verifyPasswordAsync(password, row.salt, row.password_hash))) { limiter.fail(key); throw fail(); }
+      limiter.clear(key);
+      res.json({ token: createSession(row.id), user: m.userOut(row) });
+    } catch (e) { next(e); }
   });
 
   api.use(auth);
 
   api.post('/auth/logout', (req, res) => {
     m.run('DELETE FROM sessions WHERE token = ?', req.token);
+    rt.dropToken(req.token);
     res.json({ ok: true });
   });
 
@@ -157,6 +171,7 @@ function createRouter({ m, rt, db, uploadsDir }) {
     const name = str(b.name);
     if (!name || !CHANNEL_RE.test(name))
       throw bad('Nazwa kanału: małe litery, cyfry, - i _ (maks. 80 znaków, zaczyna się od litery lub cyfry)');
+    if (name.startsWith('dm-')) throw bad('Nazwa zarezerwowana');
     let topic = '';
     if (b.topic !== undefined && b.topic !== null) {
       topic = str(b.topic);
@@ -186,11 +201,13 @@ function createRouter({ m, rt, db, uploadsDir }) {
     const row = channelOr404(parseId(req.params.id));
     if (row.is_dm) throw bad('Nie można opuścić rozmowy bezpośredniej');
     m.run('DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?', row.id, req.me);
+    rt.sendChannelToMembers('channel.updated', row.id);
     res.json({ ok: true });
   });
 
   api.patch('/channels/:id', (req, res) => {
     const row = memberChannel(req);
+    if (row.is_dm) throw bad('Nie można zmienić tematu rozmowy bezpośredniej');
     const topic = str((req.body || {}).topic);
     if (topic === null || topic.length > 250) throw bad('Temat: 0–250 znaków');
     m.run('UPDATE channels SET topic = ? WHERE id = ?', topic, row.id);
@@ -227,7 +244,8 @@ function createRouter({ m, rt, db, uploadsDir }) {
     if (!Number.isInteger(uid)) throw bad('Nieprawidłowy userId');
     if (!m.getUserRow(uid)) throw notFound('Użytkownik nie istnieje');
     const name = `dm-${Math.min(req.me, uid)}-${Math.max(req.me, uid)}`;
-    let row = m.get('SELECT * FROM channels WHERE name = ? AND is_dm = 1', name);
+    let row = m.get('SELECT * FROM channels WHERE name = ?', name);
+    if (row && !row.is_dm) throw new HttpError(409, 'Nazwa zarezerwowana');
     if (!row) {
       const id = Number(m.run(
         'INSERT INTO channels (name, topic, is_dm, is_private, created_at) VALUES (?, \'\', 1, 1, ?)', name, now()).lastInsertRowid);
@@ -276,6 +294,7 @@ function createRouter({ m, rt, db, uploadsDir }) {
       fileId = str(b.fileId);
       if (!fileId || !/^[a-f0-9]{32}$/.test(fileId) || !m.get('SELECT 1 FROM files WHERE id = ?', fileId))
         throw bad('Nieprawidłowy plik');
+      if (!m.get('SELECT 1 FROM files WHERE id = ? AND user_id = ?', fileId, req.me)) throw forbidden('To nie jest Twój plik');
     }
     const text = validText(b.text, !!fileId);
     if (!text && !fileId) throw bad('Wiadomość nie może być pusta');
@@ -285,6 +304,7 @@ function createRouter({ m, rt, db, uploadsDir }) {
       const parent = m.getMessageRow(b.parentId);
       if (!parent || parent.channel_id !== row.id || parent.parent_id !== null)
         throw bad('Wiadomość nadrzędna musi należeć do tego kanału i nie może być odpowiedzią');
+      if (parent.deleted) throw bad('Nie można odpowiadać na usuniętą wiadomość');
       parentId = parent.id;
     }
     const id = Number(m.run(
@@ -358,8 +378,9 @@ function createRouter({ m, rt, db, uploadsDir }) {
     const row = memberChannel(req);
     const mid = (req.body || {}).messageId;
     if (!Number.isInteger(mid) || mid < 0) throw bad('Nieprawidłowy messageId');
+    const top = m.get('SELECT COALESCE(MAX(id), 0) AS mx FROM messages WHERE channel_id = ?', row.id).mx;
     m.run(`UPDATE channel_members SET last_read_message_id = MAX(last_read_message_id, ?)
-           WHERE channel_id = ? AND user_id = ?`, mid, row.id, req.me);
+           WHERE channel_id = ? AND user_id = ?`, Math.min(mid, top), row.id, req.me);
     res.json({ ok: true });
   });
 
@@ -371,13 +392,14 @@ function createRouter({ m, rt, db, uploadsDir }) {
       `SELECT msg.*, c.name AS channel_name FROM messages msg
        JOIN channels c ON c.id = msg.channel_id
        JOIN channel_members cm ON cm.channel_id = msg.channel_id AND cm.user_id = ?
-       WHERE msg.deleted = 0 AND msg.text LIKE ? ESCAPE '\\'
+       WHERE msg.deleted = 0 AND lower_u(msg.text) LIKE lower_u(?) ESCAPE '\\'
        ORDER BY msg.id DESC LIMIT 50`, req.me, pattern);
     res.json({ results: rows.map((r) => ({ ...m.messageOut(r), channelName: r.channel_name })) });
   });
 
   // ---------- Pliki ----------
-  api.post('/files', (req, res) => {
+  api.post('/files', async (req, res, next) => {
+   try {
     const b = req.body || {};
     const name = str(b.name);
     const data = str(b.dataBase64);
@@ -391,11 +413,12 @@ function createRouter({ m, rt, db, uploadsDir }) {
     if (buf.length === 0) throw bad('Plik jest pusty');
     if (buf.length > MAX_FILE) throw new HttpError(413, 'Plik jest za duży (maks. 5 MB)');
     const id = crypto.randomBytes(16).toString('hex');
-    fs.mkdirSync(uploadsDir, { recursive: true });
-    fs.writeFileSync(path.join(uploadsDir, id), buf);
+    await fsp.mkdir(uploadsDir, { recursive: true });
+    await fsp.writeFile(path.join(uploadsDir, id), buf);
     m.run('INSERT INTO files (id, name, mime, size, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       id, cleanName, mime, buf.length, req.me, now());
     res.status(201).json({ file: m.fileOut(m.get('SELECT * FROM files WHERE id = ?', id)) });
+   } catch (e) { next(e); }
   });
 
   api.use((req, res, next) => next(notFound('Nie znaleziono zasobu')));
@@ -406,16 +429,18 @@ function createRouter({ m, rt, db, uploadsDir }) {
     if (!/^[a-f0-9]{32}$/.test(id)) return next(notFound());
     const f = m.get('SELECT * FROM files WHERE id = ?', id);
     if (!f) return next(notFound());
-    let buf;
-    try { buf = fs.readFileSync(path.join(uploadsDir, id)); } catch { return next(notFound()); }
     const inline = f.mime.startsWith('image/');
-    res.setHeader('Content-Type', f.mime);
-    res.setHeader('Content-Length', buf.length);
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'");
-    res.setHeader('Content-Disposition',
-      `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(f.name).replace(/['()*]/g, escape)}`);
-    res.end(buf);
+    res.sendFile(path.resolve(uploadsDir, id), {
+      dotfiles: 'allow',
+      cacheControl: false,
+      headers: {
+        'Content-Type': f.mime,
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+        'Content-Disposition':
+          `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(f.name).replace(/['()*]/g, escape)}`,
+      },
+    }, (err) => { if (err && !res.headersSent) next(notFound()); });
   }
 
   return { api, serveFile };

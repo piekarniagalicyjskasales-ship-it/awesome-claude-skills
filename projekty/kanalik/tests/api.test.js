@@ -161,7 +161,7 @@ test('rejestracja: duplikat username -> 409', async () => {
 });
 
 test('rejestracja: zły username -> 400', async () => {
-  for (const username of ['ab', 'ZLY_Login', 'ze spacja', 'a'.repeat(21), 'zly-myslnik', '']) {
+  for (const username of ['ab', 'ze spacja', 'a'.repeat(21), 'zly-myslnik', '']) {
     const r = await api('POST', '/api/auth/register', { username, password: 'haslo123' });
     assert.equal(r.status, 400, `username "${username}"`);
     assert.equal(typeof r.body.error, 'string');
@@ -998,4 +998,215 @@ test('JSON Content-Type i polski komunikat błędu w odpowiedziach błędów', a
   const body = await res.json();
   assert.equal(typeof body.error, 'string');
   assert.ok(body.error.length > 0);
+});
+
+// ======================= R1: regresje po recenzji =======================
+
+test('R1 W1: kanał o nazwie dm-* -> 400, potem /api/dms nadal działa', async () => {
+  const a = await register('w1a');
+  const b = await register('w1b');
+  const lo = Math.min(a.id, b.id);
+  const hi = Math.max(a.id, b.id);
+  for (const name of [`dm-${lo}-${hi}`, 'dm-1-2', 'dm-abc']) {
+    const r = await api('POST', '/api/channels', { name }, a.token);
+    assert.equal(r.status, 400, name);
+    assert.equal(typeof r.body.error, 'string');
+  }
+  const dm = await api('POST', '/api/dms', { userId: b.id }, a.token);
+  assert.ok([200, 201].includes(dm.status), 'status ' + dm.status);
+  assert.equal(dm.body.channel.isDm, true);
+});
+
+test('R1 W2: hasło 201 znaków -> 400 (200 znaków ok)', async () => {
+  const long = await api('POST', '/api/auth/register', { username: uniq('w2l'), password: 'a'.repeat(201) });
+  assert.equal(long.status, 400);
+  const ok = await api('POST', '/api/auth/register', { username: uniq('w2o'), password: 'a'.repeat(200) });
+  assert.equal(ok.status, 201);
+});
+
+test('R1 W2: 10 nieudanych logowań -> 11. (nawet z dobrym hasłem) 429; inny username nadal 200', async () => {
+  const victim = await register('w2v');
+  const other = await register('w2w');
+  for (let i = 0; i < 10; i++) {
+    const r = await api('POST', '/api/auth/login', { username: victim.username, password: 'zlehaslo' + i });
+    assert.equal(r.status, 401, 'próba ' + (i + 1));
+  }
+  const blocked = await api('POST', '/api/auth/login', { username: victim.username, password: 'haslo123' });
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.body.error, 'Zbyt wiele prób logowania. Spróbuj za kilka minut.');
+  const fine = await api('POST', '/api/auth/login', { username: other.username, password: 'haslo123' });
+  assert.equal(fine.status, 200);
+});
+
+test('R1 W2: udane logowanie czyści licznik nieudanych', async () => {
+  const u = await register('w2c');
+  for (let round = 0; round < 2; round++) {
+    for (let i = 0; i < 9; i++) {
+      assert.equal((await api('POST', '/api/auth/login', { username: u.username, password: 'zle' + i + 'xx' })).status, 401);
+    }
+    assert.equal((await api('POST', '/api/auth/login', { username: u.username, password: 'haslo123' })).status, 200);
+  }
+});
+
+test('R1 W2: rejestracja nie jest limitowana', async () => {
+  for (let i = 0; i < 12; i++) await register('w2r');
+});
+
+test('R1 W4: logout zamyka otwarty socket kodem 4001', async () => {
+  const a = await register('w4a');
+  const other = await register('w4b');
+  const c = await connectWs(a.token);
+  const c2 = await connectWs(other.token);
+  try {
+    await c.waitFor((m) => m.type === 'hello');
+    const closed = new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('socket nie został zamknięty')), 3000);
+      c.ws.once('close', (code) => { clearTimeout(t); resolve(code); });
+    });
+    const r = await api('POST', '/api/auth/logout', undefined, a.token);
+    assert.equal(r.status, 200);
+    assert.equal(await closed, 4001);
+    assert.equal(c2.ws.readyState, WebSocket.OPEN, 'cudzy socket zostaje otwarty');
+  } finally { await c.close(); await c2.close(); }
+});
+
+test('R1 D1: cudzy fileId -> 403', async () => {
+  const a = await register('d1a');
+  const b = await register('d1b');
+  const ch = await createChannel(a.token);
+  await api('POST', `/api/channels/${ch.id}/join`, undefined, b.token);
+  const up = await api('POST', '/api/files', { name: 'p.png', mime: 'image/png', dataBase64: PNG_BASE64 }, a.token);
+  assert.equal(up.status, 201);
+  const r = await api('POST', `/api/channels/${ch.id}/messages`, { text: 'kradne', fileId: up.body.file.id }, b.token);
+  assert.equal(r.status, 403);
+  const own = await api('POST', `/api/channels/${ch.id}/messages`, { text: 'moj', fileId: up.body.file.id }, a.token);
+  assert.equal(own.status, 201);
+});
+
+test('R1 D3: wyszukiwanie bez rozróżniania wielkości polskich liter', async () => {
+  const a = await register('d3a');
+  const ch = await createChannel(a.token);
+  const m = await send(a.token, ch.id, 'Jedziemy na ŁÓDŹ w piątek');
+  const r = await api('GET', '/api/search?q=' + encodeURIComponent('łódź'), undefined, a.token);
+  assert.equal(r.status, 200);
+  assert.ok(r.body.results.some((x) => x.id === m.id));
+  const r2 = await api('GET', '/api/search?q=' + encodeURIComponent('ŁÓDŹ'), undefined, a.token);
+  assert.ok(r2.body.results.some((x) => x.id === m.id));
+  const pct = await api('GET', '/api/search?q=' + encodeURIComponent('%%'), undefined, a.token);
+  assert.equal(pct.body.results.length, 0);
+});
+
+test('R1 D4: nagłówki bezpieczeństwa na / i na API', async () => {
+  for (const p of ['/', '/api/me']) {
+    const res = await fetch(base + p);
+    await res.arrayBuffer();
+    const csp = res.headers.get('content-security-policy');
+    assert.ok(csp, 'brak CSP na ' + p);
+    for (const part of [
+      "default-src 'self'",
+      "img-src 'self' data: blob:",
+      "connect-src 'self' ws: wss:",
+      "style-src 'self' 'unsafe-inline'",
+      "script-src 'self'",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+    ]) assert.ok(csp.includes(part), `CSP bez "${part}": ${csp}`);
+    assert.equal(res.headers.get('x-frame-options'), 'DENY');
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+  }
+});
+
+test('R1 D6: JSON >100 kB poza /api/files odrzucony (413), upload plików nadal działa', async () => {
+  const a = await register('d6a');
+  const ch = await createChannel(a.token);
+  const r = await api('POST', `/api/channels/${ch.id}/messages`, { text: 'x'.repeat(150 * 1024) }, a.token);
+  assert.ok([400, 413].includes(r.status), 'status ' + r.status);
+  const up = await api('POST', '/api/files', { name: 'p.png', mime: 'image/png', dataBase64: PNG_BASE64 }, a.token);
+  assert.equal(up.status, 201);
+});
+
+test('R1 D7: odpowiedź w wątku do usuniętej wiadomości -> 400', async () => {
+  const a = await register('d7a');
+  const ch = await createChannel(a.token);
+  const parent = await send(a.token, ch.id, 'rodzic');
+  await api('DELETE', `/api/messages/${parent.id}`, undefined, a.token);
+  const r = await api('POST', `/api/channels/${ch.id}/messages`, { text: 'odp', parentId: parent.id }, a.token);
+  assert.equal(r.status, 400);
+});
+
+test('R1 D8: leave -> pozostały członek dostaje channel.updated z memberCount-1', async () => {
+  const a = await register('d8a');
+  const b = await register('d8b');
+  const ch = await createChannel(a.token);
+  await api('POST', `/api/channels/${ch.id}/join`, undefined, b.token);
+  const wa = await connectWs(a.token);
+  try {
+    await wa.waitFor((m) => m.type === 'hello');
+    const leave = await api('POST', `/api/channels/${ch.id}/leave`, undefined, b.token);
+    assert.equal(leave.status, 200);
+    const ev = await wa.waitFor((m) => m.type === 'channel.updated' && m.channel.id === ch.id && m.channel.memberCount === 1);
+    assert.equal(ev.channel.isMember, true);
+  } finally { await wa.close(); }
+});
+
+test('R1 D9: PATCH /api/channels/:id na DM -> 400', async () => {
+  const a = await register('d9a');
+  const b = await register('d9b');
+  const dm = (await api('POST', '/api/dms', { userId: b.id }, a.token)).body.channel;
+  const r = await api('PATCH', `/api/channels/${dm.id}`, { topic: 'temat' }, a.token);
+  assert.equal(r.status, 400);
+});
+
+test('R1 D10: typing – nadmiarowe eventy (>1/s dla user+channel+parentId) ignorowane', async () => {
+  const a = await register('d10a');
+  const b = await register('d10b');
+  const ch = await createChannel(a.token);
+  await api('POST', `/api/channels/${ch.id}/join`, undefined, b.token);
+  const wa = await connectWs(a.token);
+  const wb = await connectWs(b.token);
+  try {
+    await Promise.all([wa.waitFor((m) => m.type === 'hello'), wb.waitFor((m) => m.type === 'hello')]);
+    for (let i = 0; i < 5; i++) wa.send({ type: 'typing', channelId: ch.id });
+    await wb.waitFor((m) => m.type === 'typing' && m.channelId === ch.id);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(wb.buffer.filter((m) => m.type === 'typing' && m.channelId === ch.id).length, 1);
+  } finally { await wa.close(); await wb.close(); }
+});
+
+test('R1 D10: typing od nie-członka prywatnego kanału nie dociera do członków', async () => {
+  const a = await register('d10c');
+  const outsider = await register('d10d');
+  const ch = await createChannel(a.token, { isPrivate: true });
+  const wa = await connectWs(a.token);
+  const wo = await connectWs(outsider.token);
+  try {
+    await Promise.all([wa.waitFor((m) => m.type === 'hello'), wo.waitFor((m) => m.type === 'hello')]);
+    wo.send({ type: 'typing', channelId: ch.id });
+    await wa.expectNone((m) => m.type === 'typing', 400);
+  } finally { await wa.close(); await wo.close(); }
+});
+
+test('R1 D17: register normalizuje username do lowercase', async () => {
+  const base0 = uniq('zen');
+  const mixed = base0[0].toUpperCase() + base0.slice(1).toUpperCase();
+  const r = await api('POST', '/api/auth/register', { username: mixed, password: 'haslo123' });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.user.username, base0.toLowerCase());
+  const again = await api('POST', '/api/auth/register', { username: base0.toLowerCase(), password: 'haslo123' });
+  assert.equal(again.status, 409);
+});
+
+test('R1 D18: /read z ogromnym id nie psuje licznika nieprzeczytanych', async () => {
+  const a = await register('d18a');
+  const b = await register('d18b');
+  const ch = await createChannel(a.token);
+  await api('POST', `/api/channels/${ch.id}/join`, undefined, b.token);
+  await send(b.token, ch.id, 'stara');
+  const rd = await api('POST', `/api/channels/${ch.id}/read`, { messageId: 999999999 }, a.token);
+  assert.equal(rd.status, 200);
+  await send(b.token, ch.id, 'nowa');
+  const c = (await api('GET', '/api/channels', undefined, a.token)).body.channels.find((x) => x.id === ch.id);
+  assert.equal(c.unreadCount, 1);
 });

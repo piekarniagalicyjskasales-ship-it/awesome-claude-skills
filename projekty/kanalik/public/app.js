@@ -128,7 +128,11 @@
       return pre + '<span class="mention' + (me ? ' me' : '') + '">@' + name + '</span>';
     });
     s = s.replace(/\n/g, '<br>');
-    return s.replace(/\u0000(\d+)\u0000/g, (m, i) => stash[Number(i)]);
+    // stash może zawierać zagnieżdżone placeholdery (np. kod w kodzie) - przywracaj do skutku
+    for (let k = 0; k < 8 && /\u0000\d+\u0000/.test(s); k++) {
+      s = s.replace(/\u0000(\d+)\u0000/g, (m, i) => stash[Number(i)]);
+    }
+    return s.replace(/\u0000/g, '');
   }
 
   // ---------- Daty ----------
@@ -391,6 +395,7 @@
   // ---------- Nagłówek kanału ----------
   function renderHeader() {
     const hd = $('#chan-header');
+    if (state.editingTopic && hd.querySelector('.topic input')) return; // nie kasuj trwającej edycji tematu
     hd.replaceChildren();
     const menu = h('button', { type: 'button', class: 'icon-btn menu-btn', 'aria-label': 'Pokaż menu', title: 'Menu', onclick: () => setNavOpen(true), text: '☰' });
     hd.append(menu);
@@ -435,7 +440,7 @@
     }
 
     const actions = h('div', { class: 'header-actions' });
-    actions.append(h('span', { class: 'topic', style: 'flex:none', text: c.memberCount + ' ' + plural(c.memberCount, 'członek', 'członków', 'członków') }));
+    actions.append(h('span', { class: 'member-count', text: c.memberCount + ' ' + plural(c.memberCount, 'członek', 'członków', 'członków') }));
     if (!c.isDm) {
       actions.append(h('button', { type: 'button', class: 'btn small', onclick: () => openAddPersonModal(c), text: 'Dodaj osobę' }));
       actions.append(h('button', { type: 'button', class: 'btn small', onclick: () => leaveChannel(c), text: 'Opuść kanał' }));
@@ -490,6 +495,7 @@
     state.hasMore = d.messages.length >= PAGE;
     renderMessages({ bottom: true });
     markRead();
+    fillIfShort();
     if (window.matchMedia('(min-width: 760px)').matches) mainComposer.focus();
   }
 
@@ -502,6 +508,7 @@
     state.hasMore = d.messages.length >= PAGE;
     renderMessages({ bottom: state.stick });
     markRead();
+    fillIfShort();
     if (state.panel === 'thread' && state.thread) {
       const t = await act(() => api('GET', '/api/messages/' + state.thread.parent.id + '/thread'));
       if (t && state.thread) { state.thread = t; renderPanel(); }
@@ -534,7 +541,7 @@
     } else if (c) {
       box.append(h('div', { class: 'chan-intro' }, 'To początek ', h('strong', { text: c.isDm ? 'rozmowy z ' + chanLabel(c) : '#' + c.name }), '.'));
     }
-    if (!state.messages.length) box.append(h('div', { class: 'empty', text: 'Brak wiadomości. Napisz pierwszą!' }));
+    if (!state.messages.length) box.append(h('div', { class: 'empty empty-msgs', text: 'Brak wiadomości. Napisz pierwszą!' }));
     let prev = null, lastDay = null;
     for (const m of state.messages) {
       const dk = dayKey(m.createdAt);
@@ -557,9 +564,81 @@
     if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
   }
 
-  function rerender() {
-    renderMessages({ bottom: state.stick });
-    if (state.panel === 'thread') renderPanel(true);
+  // Podmienia tylko element(y) danej wiadomości (lista główna i/lub wątek).
+  function refreshMsg(id) {
+    if (id == null) return;
+    const box = $('#messages');
+    const mainEl = box.querySelector('.msg[data-id="' + id + '"]');
+    const ta = box.querySelector('.edit-box textarea');
+    const ownEdit = ta && mainEl && mainEl.contains(ta);
+    if (mainEl) {
+      const i = state.messages.findIndex((x) => x.id === id);
+      if (i >= 0) {
+        if (ownEdit) state.editDraft = ta.value;
+        const focused = ownEdit && document.activeElement === ta;
+        const prev = i > 0 && dayKey(state.messages[i - 1].createdAt) === dayKey(state.messages[i].createdAt) ? state.messages[i - 1] : null;
+        const fresh = messageEl(state.messages[i], 'main', prev);
+        mainEl.replaceWith(fresh);
+        if (focused) focusEdit(fresh);
+        if (state.stick) box.scrollTop = box.scrollHeight;
+      }
+    }
+    if (state.panel === 'thread' && state.thread) {
+      const body = $('#panel-body');
+      const tEl = body.querySelector('.msg[data-id="' + id + '"]');
+      if (tEl) {
+        const t = state.thread;
+        let m = null, prev = null;
+        if (t.parent.id === id) m = t.parent;
+        else {
+          const i = t.replies.findIndex((x) => x.id === id);
+          if (i >= 0) { m = t.replies[i]; prev = i > 0 ? t.replies[i - 1] : null; }
+        }
+        if (m) {
+          const tta = body.querySelector('.edit-box textarea');
+          const own = tta && tEl.contains(tta);
+          if (own) state.editDraft = tta.value;
+          const focused = own && document.activeElement === tta;
+          const fresh = messageEl(m, 'thread', prev);
+          tEl.replaceWith(fresh);
+          if (focused) focusEdit(fresh);
+        }
+      }
+    }
+  }
+
+  function setPicker(p) {
+    const old = state.picker;
+    state.picker = p;
+    if (old) refreshMsg(old.id);
+    if (p && (!old || old.id !== p.id)) refreshMsg(p.id);
+  }
+
+  function setEditing(e) {
+    const old = state.editing;
+    state.editing = e;
+    if (old) refreshMsg(old.id);
+    if (e && (!old || old.id !== e.id)) refreshMsg(e.id);
+  }
+
+  // Jeśli lista nie ma paska przewijania, a są starsze wiadomości - dociągaj kolejne strony.
+  function fillIfShort() {
+    const box = $('#messages');
+    if (state.hasMore && !state.loadingOlder && box.scrollHeight <= box.clientHeight + 1) loadOlder();
+  }
+
+  // Dopisuje nową wiadomość na końcu listy bez przerysowania całości.
+  function appendMessageEl(m, prevMsg) {
+    const box = $('#messages');
+    const empty = box.querySelector('.empty-msgs');
+    if (empty) empty.remove();
+    let prev = prevMsg;
+    if (!prev || dayKey(prev.createdAt) !== dayKey(m.createdAt)) {
+      box.append(h('div', { class: 'day-sep', role: 'separator' }, dayLabel(m.createdAt)));
+      prev = null;
+    }
+    box.append(messageEl(m, 'main', prev));
+    if (state.stick) box.scrollTop = box.scrollHeight;
   }
 
   async function loadOlder() {
@@ -575,6 +654,7 @@
     state.hasMore = d.messages.length >= PAGE;
     state.messages = older.concat(state.messages);
     renderMessages({ anchor: true });
+    fillIfShort();
   }
 
   function groupable(prev, m) {
@@ -623,8 +703,7 @@
         type: 'button', class: 'icon-btn act-react', title: 'Dodaj reakcję', 'aria-label': 'Dodaj reakcję',
         onclick: (e) => {
           e.stopPropagation();
-          state.picker = state.picker && state.picker.id === m.id && state.picker.ctx === ctx ? null : { id: m.id, ctx };
-          rerender();
+          setPicker(state.picker && state.picker.id === m.id && state.picker.ctx === ctx ? null : { id: m.id, ctx });
         },
         text: '🙂',
       }));
@@ -634,7 +713,7 @@
       if (isMine) {
         actions.append(h('button', {
           type: 'button', class: 'icon-btn', title: 'Edytuj', 'aria-label': 'Edytuj wiadomość',
-          onclick: () => { state.editing = { id: m.id, ctx }; state.editDraft = m.text; state.picker = null; rerender(); focusEditSoon(); },
+          onclick: () => { state.editDraft = m.text; state.picker = null; setEditing({ id: m.id, ctx }); focusEditSoon(); },
           text: '✏️',
         }));
         actions.append(h('button', { type: 'button', class: 'icon-btn del', title: 'Usuń', 'aria-label': 'Usuń wiadomość', onclick: () => deleteMessage(m), text: '🗑️' }));
@@ -644,7 +723,7 @@
         el.append(h('div', { class: 'emoji-picker', role: 'menu', 'aria-label': 'Wybierz reakcję' },
           EMOJIS.map((em) => h('button', {
             type: 'button', role: 'menuitem', 'aria-label': 'Reakcja ' + em,
-            onclick: (e) => { e.stopPropagation(); state.picker = null; rerender(); react(m.id, em); },
+            onclick: (e) => { e.stopPropagation(); setPicker(null); react(m.id, em); },
             text: em,
           }))));
       }
@@ -666,8 +745,7 @@
       } else if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
-        state.editing = null;
-        rerender();
+        setEditing(null);
       }
     });
     return h('div', { class: 'edit-box' }, ta, h('div', { class: 'edit-hint', text: 'Enter — zapisz, Esc — anuluj, Shift+Enter — nowa linia' }));
@@ -676,10 +754,9 @@
   async function saveEdit(m, text) {
     text = text.trim();
     if (!text) { toast('Wiadomość nie może być pusta.'); return; }
-    if (text === m.text) { state.editing = null; rerender(); return; }
+    if (text === m.text) { setEditing(null); return; }
     const d = await act(() => api('PATCH', '/api/messages/' + m.id, { text }));
-    state.editing = null;
-    if (d && d.message) updateMessage(d.message); else rerender();
+    if (d && d.message) { state.editing = null; updateMessage(d.message); } else if (state.editing) setEditing(null);
   }
 
   async function deleteMessage(m) {
@@ -728,8 +805,18 @@
     clearTyping(m.channelId, m.parentId || 0, m.user.id);
     if (m.parentId) {
       if (state.panel === 'thread' && state.thread && state.thread.parent.id === m.parentId) {
+        const had = state.thread.replies.some((x) => x.id === m.id);
         upsertSorted(state.thread.replies, m);
-        renderPanel(true);
+        const rs = state.thread.replies;
+        if (had || rs[rs.length - 1].id !== m.id) renderPanel(true);
+        else {
+          const body = $('#panel-body');
+          const wasBottom = atBottom(body);
+          const sep = body.querySelector('.thread-sep');
+          if (sep) sep.textContent = rs.length + ' ' + plural(rs.length, 'odpowiedź', 'odpowiedzi', 'odpowiedzi');
+          body.append(messageEl(m, 'thread', rs.length > 1 ? rs[rs.length - 2] : null));
+          if (wasBottom) body.scrollTop = body.scrollHeight;
+        }
       }
       return;
     }
@@ -738,9 +825,13 @@
     const mine = state.me && m.user.id === state.me.id;
     if (m.channelId === state.currentId) {
       const stick = state.stick || mine;
+      const last = state.messages.length ? state.messages[state.messages.length - 1] : null;
+      const known = state.messages.some((x) => x.id === m.id);
       upsertSorted(state.messages, m);
       state.stick = stick;
-      renderMessages({ bottom: stick });
+      if (known) refreshMsg(m.id);
+      else if (!last || m.id > last.id) appendMessageEl(m, last);
+      else renderMessages({ bottom: stick });
       if (document.visibilityState === 'visible') markRead();
       else if (!mine) { ch.unreadCount = (ch.unreadCount || 0) + 1; renderSidebar(); }
     } else if (!mine) {
@@ -764,7 +855,7 @@
     }
     if (changed) {
       if (state.editing && state.editing.id === m.id && m.deleted) state.editing = null;
-      rerender();
+      refreshMsg(m.id);
     }
   }
 
@@ -968,6 +1059,7 @@
           grow();
         }
         drafts.delete(typingKey(tgt.channelId, tgt.parentId));
+        lastTyping = 0;
         state.stick = true;
         handleNewMessage(d.message);
       } catch (e) {
@@ -1334,15 +1426,14 @@
 
     document.addEventListener('click', (e) => {
       if (state.picker && !e.target.closest('.emoji-picker') && !e.target.closest('.act-react')) {
-        state.picker = null;
-        rerender();
+        setPicker(null);
       }
     });
     document.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
       if (modalState) { e.preventDefault(); closeModal(); return; }
-      if (state.picker) { state.picker = null; rerender(); return; }
-      if (state.editing) { state.editing = null; rerender(); }
+      if (state.picker) { setPicker(null); return; }
+      if (state.editing) { setEditing(null); }
     });
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') markRead();

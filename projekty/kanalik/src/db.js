@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS reactions (
 function openDb(dbPath) {
   if (dbPath !== ':memory:') fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(dbPath);
+  db.function('lower_u', { deterministic: true }, (v) => String(v ?? '').toLowerCase());
   db.exec('PRAGMA foreign_keys=ON');
   db.exec('PRAGMA journal_mode=WAL');
   db.exec('PRAGMA busy_timeout=5000');

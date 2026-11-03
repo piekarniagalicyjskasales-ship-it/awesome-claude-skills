@@ -207,6 +207,7 @@ a { color: var(--link); }
 }
 .topic-btn:hover { background: var(--bg-alt); color: var(--text); }
 .topic input { width: 100%; padding: 5px 8px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--bg); }
+.member-count { flex: none; color: var(--muted); font-size: 13.5px; }
 .header-actions { display: flex; gap: 6px; align-items: center; margin-left: auto; }
 
 .messages { flex: 1; overflow-y: auto; padding: 8px 0 12px; min-height: 0; overscroll-behavior: contain; }

@@ -2,8 +2,21 @@
 const { WebSocketServer } = require('ws');
 
 function createRealtime({ server, m }) {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
   const conns = new Map(); // userId -> Set<ws>
+  const typingSeen = new Map(); // "user:channel:parent" -> timestamp ostatniego eventu
+
+  // Heartbeat: co 30 s ping; socket bez pong od poprzedniego cyklu jest zamykany.
+  const heartbeat = setInterval(() => {
+    for (const set of conns.values()) {
+      for (const ws of set) {
+        if (ws.isAlive === false) { ws.terminate(); continue; }
+        ws.isAlive = false;
+        try { ws.ping(); } catch { /* socket już zamknięty */ }
+      }
+    }
+  }, 30000);
+  heartbeat.unref();
 
   const isOnline = (userId) => (conns.get(userId)?.size || 0) > 0;
 
@@ -48,12 +61,21 @@ function createRealtime({ server, m }) {
         ? m.get('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?', token)
         : null;
       if (!row) { ws.close(4001, 'Brak autoryzacji'); return; }
-      onConnection(ws, row);
+      onConnection(ws, row, token);
     });
   });
 
-  function onConnection(ws, userRow) {
+  function dropToken(token) {
+    for (const set of conns.values()) {
+      for (const ws of set) if (ws.token === token) ws.close(4001, 'Wylogowano');
+    }
+  }
+
+  function onConnection(ws, userRow, token) {
     const uid = userRow.id;
+    ws.token = token;
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
     let set = conns.get(uid);
     const first = !set || set.size === 0;
     if (!set) { set = new Set(); conns.set(uid, set); }
@@ -70,6 +92,11 @@ function createRealtime({ server, m }) {
         const channelId = Number(msg.channelId);
         if (!Number.isInteger(channelId) || !m.getMember(channelId, uid)) return;
         const parentId = Number.isInteger(msg.parentId) ? msg.parentId : null;
+        const key = `${uid}:${channelId}:${parentId}`;
+        const t = Date.now();
+        if (t - (typingSeen.get(key) || 0) < 1000) return;
+        if (typingSeen.size > 5000) for (const [k, v] of typingSeen) if (t - v > 1000) typingSeen.delete(k);
+        typingSeen.set(key, t);
         sendMembers(channelId, { type: 'typing', channelId, parentId, user: m.getUser(uid) }, uid);
       }
     });
@@ -84,11 +111,12 @@ function createRealtime({ server, m }) {
   }
 
   function close() {
+    clearInterval(heartbeat);
     for (const set of conns.values()) for (const ws of set) ws.terminate();
     return new Promise((resolve) => wss.close(() => resolve()));
   }
 
-  return { isOnline, sendUser, sendAll, sendMembers, sendChannelToMembers, sendChannelToAll, sendChannelEvent, close };
+  return { isOnline, sendUser, sendAll, sendMembers, sendChannelToMembers, sendChannelToAll, sendChannelEvent, dropToken, close };
 }
 
 module.exports = { createRealtime };

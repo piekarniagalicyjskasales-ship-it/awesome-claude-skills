@@ -24,7 +24,18 @@ async function start({ port = 3000, dbPath = './data/kanalik.db', uploadsDir = '
   rt = createRealtime({ server, m });
   const { api, serveFile } = createRouter({ m, rt, db, uploadsDir });
 
-  app.use(express.json({ limit: '8mb' }));
+  app.use((req, res, next) => {
+    res.setHeader('Content-Security-Policy',
+      "default-src 'self'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; " +
+      "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+  });
+  const bigJson = express.json({ limit: '8mb' });
+  const smallJson = express.json({ limit: '100kb' });
+  app.use((req, res, next) => (req.method === 'POST' && req.path === '/api/files' ? bigJson : smallJson)(req, res, next));
   app.get('/files/:id', serveFile);
   app.use('/api', api);
   app.use(express.static(path.join(__dirname, '..', 'public')));
