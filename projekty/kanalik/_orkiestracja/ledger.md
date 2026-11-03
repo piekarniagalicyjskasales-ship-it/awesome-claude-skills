@@ -22,5 +22,5 @@
 
 - Decyzja: przy utworzeniu członkostwa last_read = MAX(id) w kanale — dlaczego: dołączający nie powinien widzieć historii jako nieprzeczytanej (test unread); koszt pomyłki: niski. Poprawkę robi wykonawca T1.
 - Decyzja: wysłanie wiadomości najwyższego poziomu przesuwa last_read nadawcy — dlaczego: piszący widział kanał; test :639 zostaje. Koszt: niski.
-| T5 E2E przeglądarka | W TOKU (fala 2) | out/T5.md, out/shots/ | sonnet |
+| T5 E2E przeglądarka | DONE_WITH_CONCERNS | out/T5.md, out/shots/ | 15/15 PASS, 0 błędów konsoli, dostarczenie 68 ms; drobne: throttle typing nie resetowany po wysłaniu (app.js makeComposer) |
 | T6 Recenzja niezależna | W TOKU (fala 2) | out/T6.md | opus, równolegle z T5 (tylko odczyt) |
