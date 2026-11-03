@@ -1316,7 +1316,7 @@
     $('#add-channel').addEventListener('click', openCreateChannelModal);
     $('#browse-btn').addEventListener('click', openBrowseModal);
     $('#add-dm').addEventListener('click', openDmModal);
-    $('#panel-close').addEventListener('click', () => { closePanel(); if (state.search) $('#search').value = state.panel === 'search' ? $('#search').value : $('#search').value; });
+    $('#panel-close').addEventListener('click', closePanel);
     $('#scrim').addEventListener('click', () => setNavOpen(false));
     $('#search').addEventListener('input', onSearchInput);
     $('#search').addEventListener('keydown', (e) => {
