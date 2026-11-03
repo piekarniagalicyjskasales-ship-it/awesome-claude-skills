@@ -17,4 +17,4 @@
 | T0 Plan + kontrakt + briefy | DONE | _orkiestracja/plan.md, briefs/T1-3.md | package.json + express/ws zainstalowane |
 | T1 Backend | W TOKU (fala 1) | server.js, src/ | sonnet |
 | T2 Frontend | W TOKU (fala 1) | public/ | sonnet |
-| T3 Testy | W TOKU (fala 1) | tests/api.test.js | sonnet |
+| T3 Testy | DONE_WITH_CONCERNS | tests/api.test.js | ~50 testów; jeszcze nieuruchomione (brak backendu); kilka tolerancji statusów, ścisłe 403 dla nie-członka publicznego kanału |

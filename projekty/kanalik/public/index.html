@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kanalik</title>
+  <meta name="color-scheme" content="light dark">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<section id="auth" class="auth" hidden>
+  <div class="auth-card">
+    <h1 class="brand"><span class="brand-mark" aria-hidden="true">K</span> Kanalik</h1>
+    <p class="auth-lead">Rozmowy zespołu w jednym miejscu.</p>
+    <div class="tabs" role="tablist" aria-label="Logowanie lub rejestracja">
+      <button type="button" role="tab" id="tab-login" class="tab" aria-selected="true">Logowanie</button>
+      <button type="button" role="tab" id="tab-register" class="tab" aria-selected="false">Rejestracja</button>
+    </div>
+    <form id="auth-form" novalidate>
+      <label class="field">Nazwa użytkownika
+        <input id="f-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      </label>
+      <label class="field" id="f-display-wrap" hidden>Wyświetlana nazwa
+        <input id="f-display" name="displayName" maxlength="40" autocomplete="nickname">
+      </label>
+      <label class="field">Hasło
+        <input id="f-password" name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <p id="auth-error" class="form-error" role="alert" hidden></p>
+      <button id="auth-submit" type="submit" class="btn primary wide">Zaloguj się</button>
+    </form>
+  </div>
+</section>
+
+<div id="app" class="app" hidden>
+  <div id="scrim" class="scrim"></div>
+
+  <aside id="sidebar" class="sidebar" aria-label="Nawigacja">
+    <div class="ws-head">
+      <h1 class="ws-name"><span class="brand-mark" aria-hidden="true">K</span> Kanalik</h1>
+      <button id="logout-btn" type="button" class="side-icon" title="Wyloguj się" aria-label="Wyloguj się">⎋</button>
+    </div>
+    <button id="profile-btn" type="button" class="profile" title="Edytuj profil" aria-label="Edytuj profil"></button>
+    <div class="search-wrap">
+      <input id="search" type="search" placeholder="Szukaj wiadomości" aria-label="Szukaj wiadomości" autocomplete="off">
+    </div>
+    <nav class="side-scroll">
+      <div class="side-section">
+        <div class="side-title">
+          <span>Kanały</span>
+          <button id="add-channel" type="button" class="side-icon" title="Utwórz kanał" aria-label="Utwórz kanał">+</button>
+        </div>
+        <ul id="channel-list" class="nav-list"></ul>
+        <button id="browse-btn" type="button" class="side-link">Przeglądaj kanały</button>
+      </div>
+      <div class="side-section">
+        <div class="side-title">
+          <span>Wiadomości bezpośrednie</span>
+          <button id="add-dm" type="button" class="side-icon" title="Nowa wiadomość bezpośrednia" aria-label="Nowa wiadomość bezpośrednia">+</button>
+        </div>
+        <ul id="dm-list" class="nav-list"></ul>
+      </div>
+    </nav>
+  </aside>
+
+  <main class="main" id="main">
+    <header id="chan-header" class="chan-header"></header>
+    <div id="messages" class="messages" role="log" aria-live="off" tabindex="0" aria-label="Wiadomości"></div>
+    <div id="composer-slot" class="composer-slot"></div>
+  </main>
+
+  <aside id="panel" class="panel" hidden aria-label="Panel boczny">
+    <header class="panel-head">
+      <h2 id="panel-title" class="panel-title"></h2>
+      <button id="panel-close" type="button" class="icon-btn" title="Zamknij panel" aria-label="Zamknij panel">✕</button>
+    </header>
+    <div id="panel-body" class="panel-body"></div>
+    <div id="panel-composer" class="composer-slot"></div>
+  </aside>
+</div>
+
+<div id="modal-root"></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<script src="/app.js" defer></script>
+</body>
+</html>
