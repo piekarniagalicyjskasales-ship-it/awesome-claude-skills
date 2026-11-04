@@ -988,7 +988,6 @@
     let key = '';
     let pending = null;
     let uploading = false;
-    let sending = false;
     let lastTyping = 0;
     const drafts = new Map();
 
@@ -1041,32 +1040,36 @@
     });
 
     async function send() {
-      if (sending || uploading || !target) return;
-      const text = ta.value.trim();
+      if (uploading || !target) return;
+      const rawText = ta.value;
+      const text = rawText.trim();
       if (!text && !pending) return;
       const tgt = target;
+      const file = pending;
       const body = { text };
       if (tgt.parentId) body.parentId = tgt.parentId;
-      if (pending) body.fileId = pending.id;
-      sending = true;
-      sendBtn.disabled = true;
+      if (file) body.fileId = file.id;
+      // czyść pole od razu: kolejna wiadomość wpisana w trakcie wysyłania nie zginie
+      ta.value = '';
+      pending = null;
+      renderChip(null);
+      grow();
+      drafts.delete(typingKey(tgt.channelId, tgt.parentId));
+      lastTyping = 0;
       try {
         const d = await api('POST', '/api/channels/' + tgt.channelId + '/messages', body);
-        if (target === tgt) {
-          ta.value = '';
-          pending = null;
-          renderChip(null);
-          grow();
-        }
-        drafts.delete(typingKey(tgt.channelId, tgt.parentId));
-        lastTyping = 0;
         state.stick = true;
         handleNewMessage(d.message);
       } catch (e) {
         if (e.status !== 401) toast(e.message);
+        // przywróć treść, jeśli użytkownik nic nowego nie wpisał
+        if (target === tgt && !ta.value && !pending) {
+          ta.value = rawText;
+          pending = file;
+          if (file) renderChip(file.name + ' · ' + fmtSize(file.size), true);
+          grow();
+        }
       } finally {
-        sending = false;
-        sendBtn.disabled = false;
         ta.focus();
       }
     }

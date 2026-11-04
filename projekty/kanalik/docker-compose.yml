@@ -22,7 +22,7 @@ services:
       - "443:443"
       - "443:443/udp"
     environment:
-      DOMAIN: "${DOMAIN:?ustaw DOMAIN, np. DOMAIN=czat.firma.pl}"
+      DOMAIN: "${DOMAIN:-localhost}"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
