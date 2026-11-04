@@ -67,6 +67,9 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, parent_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);
+CREATE INDEX IF NOT EXISTS idx_messages_file ON messages(file_id);
+CREATE INDEX IF NOT EXISTS idx_members_user ON channel_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_files_user ON files(user_id);
 CREATE TABLE IF NOT EXISTS reactions (
   message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

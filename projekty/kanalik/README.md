@@ -42,12 +42,12 @@ Aplikacja nasłuchuje na `http://localhost:3000`.
 | `UPLOADS_DIR` | `./data/uploads` | katalog załączników |
 | `HOST` | `0.0.0.0` | adres nasłuchiwania |
 | `SEED` | `true` | `false` wyłącza konta demo i wiadomości powitalne |
-| `TRUST_PROXY` | wyłączone | np. `1` lub `loopback` — za reverse proxy; limiter logowań używa wtedy prawdziwego IP klienta |
+| `TRUST_PROXY` | wyłączone | liczba proxy przed aplikacją, np. `1` za jednym proxy (patrz sekcja Reverse proxy); limiter logowań używa wtedy prawdziwego IP klienta |
 | `SESSION_TTL_DAYS` | `30` | ważność sesji (przesuwana przy użyciu) |
 | `UPLOAD_QUOTA_MB` | `100` | kwota plików na użytkownika |
 | `UPLOADS_TOTAL_MB` | `5000` | globalny limit miejsca na pliki (po przekroczeniu 507) |
 | `REGISTRATION` | `open` (w Dockerze `code`) | `open`, `code` (wymaga kodu zaproszenia) lub `closed` |
-| `REGISTRATION_CODE` | — | kod zaproszenia, min. 8 znaków; wymagany przy `REGISTRATION=code` (bez niego serwer się nie uruchomi) |
+| `REGISTRATION_CODE` | — | kod zaproszenia, min. 16 znaków (np. `openssl rand -hex 16`); wymagany przy `REGISTRATION=code` (bez niego serwer się nie uruchomi) |
 | `REGISTER_LIMIT_PER_HOUR` | `5` | maks. udanych rejestracji na IP na godzinę (429 po przekroczeniu) |
 
 Niepoprawne wartości (liczby < 1, nieznany `REGISTRATION`, `SEED` inne niż `true`/`false`) kończą start czytelnym komunikatem i kodem wyjścia 1.
@@ -62,7 +62,7 @@ npm test
 
 ```
 server.js          punkt wejścia (czyta zmienne środowiskowe)
-src/app.js         start({port, dbPath, uploadsDir, seed}) -> {port, close}
+src/app.js         start({port, host, dbPath, uploadsDir, seed, registration, ...}) -> {port, close, cleanupOrphans}
 src/db.js          otwarcie bazy i schemat SQL
 src/models.js      zapytania i serializery (User, Channel, Message, File)
 src/auth.js        hasła (scrypt) i tokeny
@@ -121,7 +121,7 @@ Tryb ustawia `REGISTRATION`:
 - `code` — rejestracja wymaga pola `inviteCode` zgodnego z `REGISTRATION_CODE` (błędny kod: 403); tryb domyślny w Dockerze
 - `closed` — rejestracja wyłączona (403); konta trzeba utworzyć wcześniej
 
-Dodatkowo, niezależnie od trybu: max `REGISTER_LIMIT_PER_HOUR` udanych rejestracji na IP na godzinę.
+Dodatkowo, niezależnie od trybu: max `REGISTER_LIMIT_PER_HOUR` udanych rejestracji na IP na godzinę (domyślnie 5). Uwaga: biuro za jednym adresem publicznym (NAT) dzieli ten limit — przy wdrażaniu zespołu podnieś `REGISTER_LIMIT_PER_HOUR`. W trybie `code` dodatkowo 10 błędnych kodów na IP w 15 minut blokuje dalsze próby (429, także z poprawnym kodem). Kod zaproszenia wygeneruj losowo, np. `openssl rand -hex 16`.
 
 ## Reverse proxy i `TRUST_PROXY`
 
@@ -141,12 +141,12 @@ Zabezpieczenia:
 
 - limit nieudanych logowań: 10 prób w 10 minut na parę IP + nazwa użytkownika, potem 429 (także dla poprawnego hasła); udane logowanie zeruje licznik; hasła haszowane asynchronicznie (scrypt), maks. 200 znaków; zmiana hasła kończy wszystkie sesje
 - rejestracja: tryby `open`/`code`/`closed` i limit na IP
-- sesje: w bazie leży tylko `SHA-256(token)`; ważność przesuwana (`SESSION_TTL_DAYS`, zapis do bazy najwyżej raz na godzinę), wygasłe sesje są sprzątane; `logout-all` kończy wszystkie sesje użytkownika
+- sesje: maks. 20 na użytkownika (najstarsze są usuwane); w bazie leży tylko `SHA-256(token)`; ważność przesuwana (`SESSION_TTL_DAYS`, zapis do bazy najwyżej raz na godzinę), wygasłe sesje są sprzątane; `logout-all` kończy wszystkie sesje użytkownika
 - WebSocket bez tokenu w URL: jednorazowe bilety (30 s, tylko w pamięci serwera, limity na sesję); heartbeat (ping co 30 s), limit ramki 16 KB, limit 10 połączeń na użytkownika, zamykanie socketów wygasłych lub wylogowanych sesji
 - pliki: upload wymaga uwierzytelnienia przed odczytem body, sprawdza `Content-Length` względem kwoty (413) i miejsca na serwerze (507), maks. 2 równoległe uploady na użytkownika (429); kwota na użytkownika (`UPLOAD_QUOTA_MB`); usunięcie wiadomości usuwa jej załącznik; pliki-sieroty starsze niż 24 h (także pliki bez wiersza w bazie) są sprzątane przy starcie i co godzinę
 - Content-Security-Policy (`script-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'` itd.), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`; `Cache-Control: no-store` dla `/api/*`; pliki użytkowników są serwowane z własnym CSP `sandbox`
 - limit JSON 100 kB (8 MB tylko dla wysyłania plików)
-- łagodne zamykanie na SIGTERM/SIGINT: koniec przyjmowania połączeń, WebSockety kodem 1001, do 10 s na żądania w toku, potem zamknięcie bazy; `GET /api/health` do healthchecków
+- łagodne zamykanie na SIGTERM/SIGINT: koniec przyjmowania połączeń, WebSockety kodem 1001, do 8 s łącznie na zamknięcie WebSocketów i żądania w toku, potem zamknięcie bazy; `GET /api/health` do healthchecków
 
 Znane ograniczenia:
 
@@ -161,13 +161,21 @@ Gotowy obraz zawiera aplikację z domyślnymi ustawieniami produkcyjnymi: dane (
 
 ### Uruchomienie
 
-Ustaw kod zaproszenia (min. 8 znaków) — bez niego kontener nie wystartuje i w logach zobaczysz komunikat o błędzie konfiguracji:
+Kod zaproszenia (min. 16 znaków) trzymaj w pliku `.env` obok `docker-compose.yml` — bez niego kontener nie wystartuje, a w logach zobaczysz komunikat o błędzie konfiguracji.
 
-```
-REGISTRATION_CODE='tajny-kod-zespolu' docker compose up -d --build
-```
+1. Wygeneruj kod (jednorazowo; `cat .env` pokaże kod do przekazania zespołowi):
 
-(albo wpisz `REGISTRATION_CODE=...` do pliku `.env` obok `docker-compose.yml`; `REGISTRATION=open|closed` zmienia tryb).
+   ```
+   echo "REGISTRATION_CODE=$(openssl rand -hex 16)" > .env
+   ```
+
+2. Uruchom:
+
+   ```
+   docker compose up -d --build
+   ```
+
+Zmiana kodu = edycja `.env` i `docker compose up -d`. Tryb rejestracji zmienisz zmienną `REGISTRATION=open|closed` w tym samym pliku.
 
 Aplikacja jest dostępna na `http://localhost:3000` (port jest domyślnie przypięty tylko do `127.0.0.1` — publicznie udostępniaj ją przez reverse proxy z TLS; w compose ustawiono `TRUST_PROXY=1`).
 
@@ -175,7 +183,8 @@ Aplikacja jest dostępna na `http://localhost:3000` (port jest domyślnie przypi
 
 ```
 cp deploy/Caddyfile.example deploy/Caddyfile
-DOMAIN=czat.firma.pl REGISTRATION_CODE='tajny-kod-zespolu' docker compose --profile https up -d --build
+echo "DOMAIN=czat.firma.pl" >> .env
+docker compose --profile https up -d --build
 ```
 
 Wymagania: domena wskazuje na serwer, porty 80 i 443 (TCP i UDP dla HTTP/3) są otwarte. Caddy sam pobiera i odnawia certyfikat.

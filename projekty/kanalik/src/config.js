@@ -18,8 +18,8 @@ function resolveRegistration(option, optionCode) {
   if (!REGISTRATION_MODES.includes(mode))
     throw new ConfigError(`Nieprawidłowa wartość REGISTRATION="${mode}": dozwolone ${REGISTRATION_MODES.join(', ')}`);
   const code = optionCode !== undefined ? optionCode : (process.env.REGISTRATION_CODE || '');
-  if (mode === 'code' && (typeof code !== 'string' || code.length < 8))
-    throw new ConfigError('Tryb REGISTRATION=code wymaga ustawienia REGISTRATION_CODE (co najmniej 8 znaków). ' +
+  if (mode === 'code' && (typeof code !== 'string' || code.length < 16))
+    throw new ConfigError('Tryb REGISTRATION=code wymaga ustawienia REGISTRATION_CODE (co najmniej 16 znaków, np. wynik `openssl rand -hex 16`). ' +
       'Ustaw zmienną REGISTRATION_CODE albo użyj REGISTRATION=open lub closed.');
   return { mode, code };
 }

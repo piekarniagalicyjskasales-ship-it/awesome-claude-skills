@@ -16,7 +16,7 @@ const DAY = 24 * 3600 * 1000;
 async function start({
   port = 3000, host, dbPath = './data/kanalik.db', uploadsDir = './data/uploads', seed: doSeed = true,
   sessionTtlMs, uploadQuotaBytes, uploadsTotalBytes, orphanMaxAgeMs = DAY, trustProxy,
-  registration, registrationCode, registerRateLimit,
+  registration, registrationCode, registerRateLimit, inviteCodeRateLimit,
 } = {}) {
   // Walidacja konfiguracji przed jakimkolwiek efektem ubocznym.
   if (sessionTtlMs === undefined) sessionTtlMs = envNumber('SESSION_TTL_DAYS', { min: 1, def: 30 }) * DAY;
@@ -63,9 +63,15 @@ async function start({
   // Pliki-sieroty (bez wiadomości) starsze niż orphanMaxAgeMs oraz pliki na dysku bez wiersza w bazie.
   async function cleanupOrphans() {
     const cutoffMs = Date.now() - orphanMaxAgeMs;
-    const rows = m.all('SELECT id FROM files WHERE created_at <= ?', new Date(cutoffMs).toISOString());
+    const rows = m.all(
+      `SELECT id FROM files f WHERE created_at <= ?
+       AND NOT EXISTS (SELECT 1 FROM messages WHERE file_id = f.id)`, new Date(cutoffMs).toISOString());
     let removed = 0;
-    for (const r of rows) if (!pendingIds.has(r.id) && await dropOrphanRow(r.id)) removed++;
+    let n = 0;
+    for (const r of rows) {
+      if (++n % 200 === 0) await new Promise((resolve) => setImmediate(resolve));
+      if (!pendingIds.has(r.id) && await dropOrphanRow(r.id)) removed++;
+    }
     let names = [];
     try { names = await fsp.readdir(uploadsDir); } catch { /* brak katalogu */ }
     for (const name of names) {
@@ -106,7 +112,7 @@ async function start({
 
   const { api, serveFile } = createRouter({
     m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, uploadsTotalBytes, removeFile, pendingIds,
-    registration: reg.mode, registrationCode: reg.code, registerLimit,
+    registration: reg.mode, registrationCode: reg.code, registerLimit, inviteCodeLimit: inviteCodeRateLimit !== false,
   });
 
   app.use((req, res, next) => {
@@ -154,10 +160,11 @@ async function start({
       const serverClosed = new Promise((resolve) => server.close(() => resolve()));
       server.closeIdleConnections();
       // 2. WebSockety: kod 1001
+      const t0 = Date.now();
       await rt.close();
-      // 3. poczekaj na trwające żądania (max 10 s)
+      // 3. poczekaj na trwające żądania (łącznie z zamknięciem WS max 8 s)
       let timer;
-      const timeout = new Promise((resolve) => { timer = setTimeout(resolve, 10000); });
+      const timeout = new Promise((resolve) => { timer = setTimeout(resolve, Math.max(0, 8000 - (Date.now() - t0))); });
       const idleSweep = setInterval(() => server.closeIdleConnections(), 100);
       await Promise.race([serverClosed, timeout]);
       clearTimeout(timer);

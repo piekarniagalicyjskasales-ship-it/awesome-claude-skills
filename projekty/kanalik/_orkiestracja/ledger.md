@@ -71,5 +71,10 @@ D2 kwota plików / sprzątanie sierot; D5 wygasanie sesji, tokeny jawne w bazie;
 
 ## Runda R4 (ostatnia, runda poprawek 2/3 dla bezpieczeństwa) — briefs/R4.md
 - Decyzja: indeks + przegląd indeksów; limiter błędnych kodów 10/IP/15 min; kod min 16 znaków; max 20 sesji/użytkownika; limiter zmiany hasła per sesja; shutdown ≤ 8 s + stop_grace_period 15 s. Koszt: niski.
-| R4-B Backend | W TOKU | src/, README, compose | wznowiony T1 |
-| R4-T Testy | W TOKU | tests/ | wznowiony T3 |
+| R4-B Backend | DONE | src/, README, compose, .gitignore | indeksy file_id/user_id; limiter kodów; kod ≥16; 20 sesji; limiter hasła per sesja; shutdown ≤8 s; README: kod w .env (decyzja kontrolera — inline $(openssl) zmieniał kod przy każdym up) |
+| R4-T Testy | DONE | tests/ | +4, 2 zmienione |
+| R4-V Weryfikacja kontrolera | DONE | — | npm test 104/104 ×3; W-N1: start z 3000 sierot + 200k wiadomości 1,27 s (było 46 s), sieroty usunięte; E2E 15/15, 0 błędów konsoli; Docker: kod <16 → czytelny błąd, 10× zły kod 403 → 11. 429, health OK, stop 255 ms |
+
+## Stan końcowy (R4)
+- Gotowe do wystawienia w internecie za HTTPS (Caddy z compose), jedna instancja, losowy kod zaproszenia ≥16 znaków w .env.
+- Znane ograniczenia (README): SEED=true przy lokalnym `npm start`; socket wygasłej sesji żyje ≤30 s; brak skalowania poziomego (bilety/limity w pamięci); limit rejestracji per IP (NAT biura → podnieś REGISTER_LIMIT_PER_HOUR); Drobne z R3-V nieobjęte R4 — patrz out/R3-V.md.

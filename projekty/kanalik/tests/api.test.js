@@ -1452,7 +1452,7 @@ test('R2: /api/health 200 {ok:true} bez autoryzacji', async () => {
 const http = require('node:http');
 
 test('R3 W3: tryb code – bez kodu 403, zły kod 403, dobry kod 201', async () => {
-  const inst = await startInstance({ registration: 'code', registrationCode: 'zaproszenie-123' });
+  const inst = await startInstance({ registration: 'code', registrationCode: 'zaproszenie-1234567' });
   try {
     const reg = (extra) => inst.api('POST', '/api/auth/register', { username: uniq('inv'), password: 'haslo123', ...extra });
     const none = await reg({});
@@ -1461,7 +1461,7 @@ test('R3 W3: tryb code – bez kodu 403, zły kod 403, dobry kod 201', async () 
     const bad = await reg({ inviteCode: 'zle-zaproszenie' });
     assert.equal(bad.status, 403);
     assert.equal(bad.body.error, 'Nieprawidłowy kod zaproszenia');
-    const good = await reg({ inviteCode: 'zaproszenie-123' });
+    const good = await reg({ inviteCode: 'zaproszenie-1234567' });
     assert.equal(good.status, 201);
     assert.equal(typeof good.body.token, 'string');
     const cfg = await inst.api('GET', '/api/config');
@@ -1479,9 +1479,9 @@ test('R3 W3: tryb closed -> 403 "Rejestracja jest wyłączona"', async () => {
   } finally { await inst.close(); inst.cleanup(); }
 });
 
-test('R3 W3: start() w trybie code bez kodu lub z kodem <8 znaków jest odrzucany', async () => {
+test('R3 W3: start() w trybie code bez kodu lub z kodem <16 znaków jest odrzucany', async () => {
   const { start } = require('../src/app');
-  for (const registrationCode of [undefined, '', 'krotki7']) {
+  for (const registrationCode of [undefined, '', 'krotki7', '123456789012345']) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kanalik-r3-'));
     const saved = process.env.REGISTRATION_CODE;
     delete process.env.REGISTRATION_CODE;
@@ -1674,4 +1674,73 @@ test('R3 D10: zmiana hasła – złe obecne 403, walidacja 400, po zmianie stare
     const nl = await api('POST', '/api/auth/login', { username: a.username, password: 'nowehaslo1' });
     assert.equal(nl.status, 200);
   } finally { await c.close(); }
+});
+
+// ======================= R4: KONTRAKT v4 =======================
+
+test('R4 W-N2: 11. błędny kod zaproszenia z tego samego IP -> 429 (także poprawny kod)', async () => {
+  const code = 'zaproszenie-1234567';
+  const inst = await startInstance({ registration: 'code', registrationCode: code });
+  try {
+    const reg = (inviteCode) => inst.api('POST', '/api/auth/register', { username: uniq('ic'), password: 'haslo123', inviteCode });
+    for (let i = 0; i < 10; i++) {
+      assert.equal((await reg('zly-kod-' + i)).status, 403, 'próba ' + (i + 1));
+    }
+    const eleventh = await reg('zly-kod-11');
+    assert.equal(eleventh.status, 429);
+    assert.equal(eleventh.body.error, 'Zbyt wiele prób. Spróbuj później.');
+    const good = await reg(code);
+    assert.equal(good.status, 429, 'poprawny kod po przekroczeniu też 429');
+  } finally { await inst.close(); inst.cleanup(); }
+});
+
+test('R4 W-N1: indeks idx_messages_file istnieje w bazie', async () => {
+  const inst = await startInstance();
+  try { await inst.register('idx'); } finally { await inst.close(); }
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(inst.dbPath, { readOnly: true });
+    const names = db.prepare('PRAGMA index_list(messages)').all().map((r) => r.name);
+    db.close();
+    assert.ok(names.includes('idx_messages_file'), 'indeksy: ' + names);
+  } finally { inst.cleanup(); }
+});
+
+test('R4: max 20 sesji na użytkownika – 21. sesja usuwa najstarszą i zamyka jej socket (4001)', async () => {
+  const a = await register('s20');
+  const oldest = a.token;
+  const c = await connectWs(oldest);
+  try {
+    await c.waitFor((m) => m.type === 'hello');
+    const closing = new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('socket nie zamknięty')), 3000);
+      c.ws.once('close', (code) => { clearTimeout(t); resolve(code); });
+    });
+    const tokens = [];
+    for (let i = 0; i < 20; i++) {
+      const r = await api('POST', '/api/auth/login', { username: a.username, password: 'haslo123' });
+      assert.equal(r.status, 200);
+      tokens.push(r.body.token);
+    }
+    assert.equal(await closing, 4001);
+    assert.equal((await api('GET', '/api/me', undefined, oldest)).status, 401);
+    assert.equal((await api('GET', '/api/me', undefined, tokens[0])).status, 200);
+    assert.equal((await api('GET', '/api/me', undefined, tokens[19])).status, 200);
+  } finally { await c.close(); }
+});
+
+test('R4: limiter zmiany hasła jest per sesja (A zablokowana, B nadal może zmienić hasło)', async () => {
+  const a = await register('pls');
+  const login = await api('POST', '/api/auth/login', { username: a.username, password: 'haslo123' });
+  const sessionB = login.body.token;
+  const statuses = [];
+  for (let i = 0; i < 12; i++) {
+    statuses.push((await api('POST', '/api/me/password', { currentPassword: 'zle' + i + 'haslo', newPassword: 'nowehaslo1' }, a.token)).status);
+  }
+  assert.ok(statuses.slice(0, 10).every((s) => s === 403), 'pierwsze 10: ' + statuses);
+  assert.ok(statuses.slice(10).includes(429), 'po 10 próbach oczekiwane 429: ' + statuses);
+  const blockedA = await api('POST', '/api/me/password', { currentPassword: 'haslo123', newPassword: 'nowehaslo1' }, a.token);
+  assert.equal(blockedA.status, 429);
+  const okB = await api('POST', '/api/me/password', { currentPassword: 'haslo123', newPassword: 'nowehaslo1' }, sessionB);
+  assert.equal(okB.status, 200);
 });

@@ -28,12 +28,13 @@ const now = () => new Date().toISOString();
 
 function createRouter({
   m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, uploadsTotalBytes, removeFile, pendingIds,
-  registration, registrationCode, registerLimit,
+  registration, registrationCode, registerLimit, inviteCodeLimit,
 }) {
   const api = express.Router();
   const limiter = createLoginLimiter();
   const registerLimiter = registerLimit ? createLoginLimiter({ max: registerLimit, windowMs: 3600 * 1000 }) : null;
   const codeHash = registration === 'code' ? crypto.createHash('sha256').update(registrationCode).digest() : null;
+  const inviteLimiter = inviteCodeLimit ? createLoginLimiter({ max: 10, windowMs: 15 * 60 * 1000 }) : null;
   const ticketWindows = new Map(); // tokenHash -> { n, start }
 
   function addMember(channelId, userId) {
@@ -71,6 +72,12 @@ function createRouter({
   function createSession(userId) {
     const token = newToken();
     const t = Date.now();
+    // Max 20 sesji na użytkownika: najstarsze (wg last_used_at) są usuwane, a ich sockety zamykane.
+    const old = m.all('SELECT token_hash FROM sessions WHERE user_id = ? ORDER BY last_used_at ASC, created_at ASC', userId);
+    for (const o of old.slice(0, Math.max(0, old.length - 19))) {
+      m.run('DELETE FROM sessions WHERE token_hash = ?', o.token_hash);
+      rt.dropSession(o.token_hash);
+    }
     m.run('INSERT INTO sessions (token_hash, user_id, created_at, expires_at, last_used_at) VALUES (?, ?, ?, ?, ?)',
       hashToken(token), userId, t, t + sessionTtlMs, t);
     return token;
@@ -89,10 +96,14 @@ function createRouter({
     if (registerLimiter && registerLimiter.blocked(req.ip))
       throw new HttpError(429, 'Zbyt wiele rejestracji. Spróbuj później.');
     if (codeHash) {
+      if (inviteLimiter && inviteLimiter.blocked(req.ip)) throw new HttpError(429, 'Zbyt wiele prób. Spróbuj później.');
       const given = str((req.body || {}).inviteCode);
       const ok = given !== null &&
         crypto.timingSafeEqual(crypto.createHash('sha256').update(given).digest(), codeHash);
-      if (!ok) throw forbidden('Nieprawidłowy kod zaproszenia');
+      if (!ok) {
+        if (inviteLimiter) inviteLimiter.fail(req.ip);
+        throw forbidden('Nieprawidłowy kod zaproszenia');
+      }
     }
     const b = req.body || {};
     const username = str(b.username) === null ? null : str(b.username).trim().toLowerCase();
@@ -175,7 +186,7 @@ function createRouter({
       if (!cur || !next_) throw bad('Podaj obecne i nowe hasło');
       if (next_.length < 6) throw bad('Hasło musi mieć co najmniej 6 znaków');
       if (next_.length > 200) throw bad('Hasło może mieć maksymalnie 200 znaków');
-      const key = 'pw:' + req.me;
+      const key = 'pw:' + req.tokenHash;
       if (limiter.blocked(key)) throw new HttpError(429, 'Zbyt wiele prób. Spróbuj za kilka minut.');
       const row = m.get('SELECT * FROM users WHERE id = ?', req.me);
       if (cur.length > 200 || !(await verifyPasswordAsync(cur, row.salt, row.password_hash))) {
