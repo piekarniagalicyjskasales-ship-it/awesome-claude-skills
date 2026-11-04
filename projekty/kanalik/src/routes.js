@@ -26,9 +26,15 @@ function parseId(v) {
 }
 const now = () => new Date().toISOString();
 
-function createRouter({ m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, removeFile }) {
+function createRouter({
+  m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, uploadsTotalBytes, removeFile, pendingIds,
+  registration, registrationCode, registerLimit,
+}) {
   const api = express.Router();
   const limiter = createLoginLimiter();
+  const registerLimiter = registerLimit ? createLoginLimiter({ max: registerLimit, windowMs: 3600 * 1000 }) : null;
+  const codeHash = registration === 'code' ? crypto.createHash('sha256').update(registrationCode).digest() : null;
+  const ticketWindows = new Map(); // tokenHash -> { n, start }
 
   function addMember(channelId, userId) {
     const last = m.get('SELECT COALESCE(MAX(id), 0) AS mx FROM messages WHERE channel_id = ?', channelId).mx;
@@ -50,6 +56,7 @@ function createRouter({ m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, r
     if (!row) return next(new HttpError(401, 'Wymagane zalogowanie'));
     if (row.s_expires < t) {
       m.run('DELETE FROM sessions WHERE token_hash = ?', tokenHash);
+      rt.dropSession(tokenHash);
       return next(new HttpError(401, 'Sesja wygasła'));
     }
     if (t - row.s_last > HOUR) {
@@ -74,8 +81,19 @@ function createRouter({ m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, r
     res.json({ ok: true });
   });
 
+  api.get('/config', (req, res) => res.json({ registration }));
+
   api.post('/auth/register', async (req, res, next) => {
    try {
+    if (registration === 'closed') throw forbidden('Rejestracja jest wyłączona');
+    if (registerLimiter && registerLimiter.blocked(req.ip))
+      throw new HttpError(429, 'Zbyt wiele rejestracji. Spróbuj później.');
+    if (codeHash) {
+      const given = str((req.body || {}).inviteCode);
+      const ok = given !== null &&
+        crypto.timingSafeEqual(crypto.createHash('sha256').update(given).digest(), codeHash);
+      if (!ok) throw forbidden('Nieprawidłowy kod zaproszenia');
+    }
     const b = req.body || {};
     const username = str(b.username) === null ? null : str(b.username).trim().toLowerCase();
     const password = str(b.password);
@@ -102,6 +120,7 @@ function createRouter({ m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, r
     const user = m.getUser(id);
     rt.sendAll({ type: 'user.updated', user });
     for (const c of defaults) rt.sendMembers(c.id, { type: 'channel.member_joined', channelId: c.id, user }, id);
+    if (registerLimiter) registerLimiter.fail(req.ip);
     res.status(201).json({ token: createSession(id), user });
    } catch (e) { next(e); }
   });
@@ -139,7 +158,38 @@ function createRouter({ m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, r
     res.json({ ok: true });
   });
 
-  api.post('/ws-ticket', (req, res) => res.json({ ticket: rt.createTicket(req.me, req.tokenHash) }));
+  api.post('/ws-ticket', (req, res) => {
+    const t = Date.now();
+    for (const [k, v] of ticketWindows) if (t - v.start > 60000) ticketWindows.delete(k);
+    let w = ticketWindows.get(req.tokenHash);
+    if (!w) { w = { n: 0, start: t }; ticketWindows.set(req.tokenHash, w); }
+    if (++w.n > 30) throw new HttpError(429, 'Zbyt wiele żądań. Spróbuj za chwilę.');
+    res.json({ ticket: rt.createTicket(req.me, req.tokenHash) });
+  });
+
+  api.post('/me/password', async (req, res, next) => {
+    try {
+      const b = req.body || {};
+      const cur = str(b.currentPassword);
+      const next_ = str(b.newPassword);
+      if (!cur || !next_) throw bad('Podaj obecne i nowe hasło');
+      if (next_.length < 6) throw bad('Hasło musi mieć co najmniej 6 znaków');
+      if (next_.length > 200) throw bad('Hasło może mieć maksymalnie 200 znaków');
+      const key = 'pw:' + req.me;
+      if (limiter.blocked(key)) throw new HttpError(429, 'Zbyt wiele prób. Spróbuj za kilka minut.');
+      const row = m.get('SELECT * FROM users WHERE id = ?', req.me);
+      if (cur.length > 200 || !(await verifyPasswordAsync(cur, row.salt, row.password_hash))) {
+        limiter.fail(key);
+        throw forbidden('Nieprawidłowe obecne hasło');
+      }
+      limiter.clear(key);
+      const { salt, hash } = await hashPasswordAsync(next_);
+      m.run('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?', hash, salt, req.me);
+      m.run('DELETE FROM sessions WHERE user_id = ?', req.me);
+      rt.dropUser(req.me);
+      res.json({ ok: true, token: createSession(req.me) });
+    } catch (e) { next(e); }
+  });
 
   const usedBytes = (uid) => m.get('SELECT COALESCE(SUM(size), 0) AS s FROM files WHERE user_id = ?', uid).s;
   api.get('/me/storage', (req, res) => res.json({ usedBytes: usedBytes(req.me), quotaBytes: uploadQuotaBytes }));
@@ -431,7 +481,31 @@ function createRouter({ m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, r
   });
 
   // ---------- Pliki ----------
-  api.post('/files', async (req, res, next) => {
+  const totalBytes = () => m.get('SELECT COALESCE(SUM(size), 0) AS s FROM files').s;
+  const uploading = new Map(); // userId -> liczba trwających uploadów
+  // Wykonywane PO uwierzytelnieniu, a PRZED parsowaniem body.
+  function uploadGuard(req, res, next) {
+    const raw = req.headers['content-length'];
+    if (raw === undefined) return next(new HttpError(411, 'Wymagany nagłówek Content-Length'));
+    const cl = Number(raw);
+    if (!Number.isFinite(cl) || cl < 0) return next(bad('Nieprawidłowy Content-Length'));
+    const approx = Math.max(0, cl - 1024) * 3 / 4; // minus narzut JSON (nazwa, mime)
+    if (approx > MAX_FILE + 4096) return next(new HttpError(413, 'Plik jest za duży (maks. 5 MB)'));
+    if (usedBytes(req.me) + approx > uploadQuotaBytes)
+      return next(new HttpError(413, 'Przekroczono limit miejsca na pliki'));
+    if (totalBytes() + approx > uploadsTotalBytes) return next(new HttpError(507, 'Brak miejsca na serwerze'));
+    const n = uploading.get(req.me) || 0;
+    if (n >= 2) return next(new HttpError(429, 'Poczekaj na zakończenie poprzedniego przesyłania'));
+    uploading.set(req.me, n + 1);
+    res.on('close', () => {
+      const c = (uploading.get(req.me) || 1) - 1;
+      if (c <= 0) uploading.delete(req.me); else uploading.set(req.me, c);
+    });
+    next();
+  }
+
+  api.post('/files', uploadGuard, express.json({ limit: '8mb' }), async (req, res, next) => {
+   let id = null;
    try {
     const b = req.body || {};
     const name = str(b.name);
@@ -447,17 +521,30 @@ function createRouter({ m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, r
     if (buf.length > MAX_FILE) throw new HttpError(413, 'Plik jest za duży (maks. 5 MB)');
     if (usedBytes(req.me) + buf.length > uploadQuotaBytes)
       throw new HttpError(413, 'Przekroczono limit miejsca na pliki');
-    const id = crypto.randomBytes(16).toString('hex');
+    if (totalBytes() + buf.length > uploadsTotalBytes) throw new HttpError(507, 'Brak miejsca na serwerze');
+    id = crypto.randomBytes(16).toString('hex');
+    pendingIds.add(id);
     await fsp.mkdir(uploadsDir, { recursive: true });
     await fsp.writeFile(path.join(uploadsDir, id), buf);
     if (usedBytes(req.me) + buf.length > uploadQuotaBytes) {
       await fsp.unlink(path.join(uploadsDir, id)).catch(() => {});
       throw new HttpError(413, 'Przekroczono limit miejsca na pliki');
     }
+    if (totalBytes() + buf.length > uploadsTotalBytes) {
+      await fsp.unlink(path.join(uploadsDir, id)).catch(() => {});
+      throw new HttpError(507, 'Brak miejsca na serwerze');
+    }
     m.run('INSERT INTO files (id, name, mime, size, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       id, cleanName, mime, buf.length, req.me, now());
+    pendingIds.delete(id);
     res.status(201).json({ file: m.fileOut(m.get('SELECT * FROM files WHERE id = ?', id)) });
-   } catch (e) { next(e); }
+   } catch (e) {
+     if (id) {
+       pendingIds.delete(id);
+       if (!m.get('SELECT 1 FROM files WHERE id = ?', id)) await fsp.unlink(path.join(uploadsDir, id)).catch(() => {});
+     }
+     next(e);
+   }
   });
 
   api.use((req, res, next) => next(notFound('Nie znaleziono zasobu')));

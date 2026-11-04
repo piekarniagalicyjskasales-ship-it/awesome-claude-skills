@@ -19,6 +19,8 @@ before(async () => {
     dbPath: path.join(tmpDir, 'test.db'),
     uploadsDir: path.join(tmpDir, 'uploads'),
     seed: false,
+    registerRateLimit: false,
+    registration: 'open',
   });
   base = `http://127.0.0.1:${server.port}`;
 });
@@ -153,6 +155,8 @@ async function startInstance(opts = {}) {
     dbPath,
     uploadsDir: path.join(dir, 'uploads'),
     seed: false,
+    registerRateLimit: false,
+    registration: 'open',
     ...opts,
   });
   const url = `http://127.0.0.1:${srv.port}`;
@@ -1149,7 +1153,7 @@ test('R1 D4: nagłówki bezpieczeństwa na / i na API', async () => {
     for (const part of [
       "default-src 'self'",
       "img-src 'self' data: blob:",
-      "connect-src 'self' ws: wss:",
+      "connect-src 'self'",
       "style-src 'self' 'unsafe-inline'",
       "script-src 'self'",
       "object-src 'none'",
@@ -1442,4 +1446,232 @@ test('R2: /api/health 200 {ok:true} bez autoryzacji', async () => {
   const res = await fetch(base + '/api/health');
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true });
+});
+
+// ======================= R3: KONTRAKT v3 =======================
+const http = require('node:http');
+
+test('R3 W3: tryb code – bez kodu 403, zły kod 403, dobry kod 201', async () => {
+  const inst = await startInstance({ registration: 'code', registrationCode: 'zaproszenie-123' });
+  try {
+    const reg = (extra) => inst.api('POST', '/api/auth/register', { username: uniq('inv'), password: 'haslo123', ...extra });
+    const none = await reg({});
+    assert.equal(none.status, 403);
+    assert.equal(none.body.error, 'Nieprawidłowy kod zaproszenia');
+    const bad = await reg({ inviteCode: 'zle-zaproszenie' });
+    assert.equal(bad.status, 403);
+    assert.equal(bad.body.error, 'Nieprawidłowy kod zaproszenia');
+    const good = await reg({ inviteCode: 'zaproszenie-123' });
+    assert.equal(good.status, 201);
+    assert.equal(typeof good.body.token, 'string');
+    const cfg = await inst.api('GET', '/api/config');
+    assert.deepEqual(cfg.body, { registration: 'code' });
+  } finally { await inst.close(); inst.cleanup(); }
+});
+
+test('R3 W3: tryb closed -> 403 "Rejestracja jest wyłączona"', async () => {
+  const inst = await startInstance({ registration: 'closed' });
+  try {
+    const r = await inst.api('POST', '/api/auth/register', { username: uniq('cl'), password: 'haslo123' });
+    assert.equal(r.status, 403);
+    assert.equal(r.body.error, 'Rejestracja jest wyłączona');
+    assert.deepEqual((await inst.api('GET', '/api/config')).body, { registration: 'closed' });
+  } finally { await inst.close(); inst.cleanup(); }
+});
+
+test('R3 W3: start() w trybie code bez kodu lub z kodem <8 znaków jest odrzucany', async () => {
+  const { start } = require('../src/app');
+  for (const registrationCode of [undefined, '', 'krotki7']) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kanalik-r3-'));
+    const saved = process.env.REGISTRATION_CODE;
+    delete process.env.REGISTRATION_CODE;
+    let started = null;
+    try {
+      await assert.rejects(async () => {
+        started = await start({
+          port: 0,
+          dbPath: path.join(dir, 't.db'),
+          uploadsDir: path.join(dir, 'u'),
+          seed: false,
+          registration: 'code',
+          registrationCode,
+        });
+      }, `kod: ${JSON.stringify(registrationCode)}`);
+    } finally {
+      if (saved !== undefined) process.env.REGISTRATION_CODE = saved;
+      if (started) await started.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('R3 W3: GET /api/config bez auth -> {registration:"open"} na głównej instancji', async () => {
+  const r = await api('GET', '/api/config');
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { registration: 'open' });
+});
+
+test('R3 W3: limit rejestracji na IP (limit 2 -> trzecia 429)', async () => {
+  const saved = process.env.REGISTER_LIMIT_PER_HOUR;
+  process.env.REGISTER_LIMIT_PER_HOUR = '2';
+  let inst;
+  try {
+    inst = await startInstance({ registerRateLimit: 2 });
+  } finally {
+    if (saved === undefined) delete process.env.REGISTER_LIMIT_PER_HOUR; else process.env.REGISTER_LIMIT_PER_HOUR = saved;
+  }
+  try {
+    const reg = () => inst.api('POST', '/api/auth/register', { username: uniq('rl'), password: 'haslo123' });
+    assert.equal((await reg()).status, 201);
+    assert.equal((await reg()).status, 201);
+    assert.equal((await reg()).status, 429);
+  } finally { await inst.close(); inst.cleanup(); }
+});
+
+test('R3 W1: POST /api/files bez auth -> 401 (duże body)', async () => {
+  const big = Buffer.alloc(4 * 1024 * 1024, 1).toString('base64');
+  const r = await api('POST', '/api/files', { name: 'x.bin', mime: 'application/octet-stream', dataBase64: big });
+  assert.equal(r.status, 401);
+  const r2 = await api('POST', '/api/files', { name: 'x.bin', mime: 'application/octet-stream', dataBase64: big }, 'zlytoken');
+  assert.equal(r2.status, 401);
+});
+
+test('R3 W1: Content-Length ponad pozostałą kwotę -> 413', async () => {
+  const inst = await startInstance({ uploadQuotaBytes: 1000 });
+  try {
+    const a = await inst.register('cl');
+    const body = JSON.stringify({ name: 'a.bin', mime: 'application/octet-stream', dataBase64: Buffer.alloc(5000, 1).toString('base64') });
+    const res = await fetch(inst.url + '/api/files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + a.token },
+      body,
+    });
+    assert.equal(res.status, 413);
+    await res.arrayBuffer();
+  } finally { await inst.close(); inst.cleanup(); }
+});
+
+test('R3 W1: brak Content-Length (chunked) -> 411', async () => {
+  const a = await register('c411');
+  const status = await new Promise((resolve, reject) => {
+    const u = new URL(base);
+    const req = http.request({
+      host: u.hostname, port: u.port, path: '/api/files', method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + a.token, 'Transfer-Encoding': 'chunked' },
+    }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+    req.on('error', reject);
+    req.write('{"name":"a.bin",');
+    req.end('"mime":"application/octet-stream","dataBase64":"AAAA"}');
+  });
+  assert.equal(status, 411);
+});
+
+test('R3 W1: 3 równoległe uploady jednego użytkownika -> co najmniej jeden 429', async () => {
+  // Test zależy od nakładania się żądań w czasie; duże pliki zwiększają szansę.
+  const a = await register('par');
+  const big = Buffer.alloc(4 * 1024 * 1024, 2).toString('base64');
+  const up = () => api('POST', '/api/files', { name: 'b.bin', mime: 'application/octet-stream', dataBase64: big }, a.token);
+  const results = await Promise.all([up(), up(), up()]);
+  const statuses = results.map((r) => r.status);
+  assert.ok(statuses.includes(429), 'statusy: ' + statuses);
+  const limited = results.find((r) => r.status === 429);
+  assert.equal(limited.body.error, 'Poczekaj na zakończenie poprzedniego przesyłania');
+});
+
+test('R3 D3: globalny limit miejsca (uploadsTotalBytes) -> 507', async () => {
+  const inst = await startInstance({ uploadsTotalBytes: 1000 });
+  try {
+    const a = await inst.register('g1');
+    const b = await inst.register('g2');
+    const chunk = Buffer.alloc(600, 7).toString('base64');
+    const up = (t) => inst.api('POST', '/api/files', { name: 'a.bin', mime: 'application/octet-stream', dataBase64: chunk }, t);
+    assert.equal((await up(a.token)).status, 201);
+    const r = await up(b.token);
+    assert.equal(r.status, 507);
+    assert.equal(r.body.error, 'Brak miejsca na serwerze');
+  } finally { await inst.close(); inst.cleanup(); }
+});
+
+test('R3 D2: 11. jednoczesne połączenie WS użytkownika -> 4008', async () => {
+  const a = await register('ws11');
+  const clients = [];
+  try {
+    for (let i = 0; i < 10; i++) {
+      const c = await connectWs(a.token);
+      await c.waitFor((m) => m.type === 'hello');
+      clients.push(c);
+    }
+    const code = await waitForCloseQuery('?ticket=' + (await getTicket(a.token)));
+    assert.equal(code, 4008);
+  } finally { await Promise.all(clients.map((c) => c.close())); }
+});
+
+test('R3 D1: 21 biletów na sesję -> pierwszy unieważniony (4001), ostatni działa', async () => {
+  const a = await register('t21');
+  const tickets = [];
+  for (let i = 0; i < 21; i++) tickets.push(await getTicket(a.token));
+  assert.equal(await waitForCloseQuery('?ticket=' + tickets[0]), 4001);
+  const c = await connectWsTicket(tickets[20]);
+  try { await c.waitFor((m) => m.type === 'hello'); } finally { await c.close(); }
+});
+
+test('R3: limit biletów 30/min na sesję -> 429', async () => {
+  const a = await register('t30');
+  const statuses = [];
+  for (let i = 0; i < 32; i++) statuses.push((await api('POST', '/api/ws-ticket', undefined, a.token)).status);
+  assert.ok(statuses.slice(0, 30).every((s) => s === 200), 'pierwsze 30: ' + statuses);
+  assert.equal(statuses[31], 429);
+});
+
+test('R3 D8: Cache-Control: no-store na /api/*', async () => {
+  const a = await register('ncs');
+  for (const [p, tok] of [['/api/me', a.token], ['/api/config'], ['/api/health'], ['/api/me', undefined]]) {
+    const res = await fetch(base + p, { headers: tok ? { Authorization: 'Bearer ' + tok } : {} });
+    await res.arrayBuffer();
+    assert.match(res.headers.get('cache-control') || '', /no-store/, p);
+  }
+});
+
+test('R3 D12: CSP ma connect-src \'self\' i nie zawiera ws:/wss:', async () => {
+  const res = await fetch(base + '/');
+  await res.arrayBuffer();
+  const csp = res.headers.get('content-security-policy') || '';
+  assert.ok(csp.includes("connect-src 'self'"), csp);
+  assert.ok(!/\bwss?:/.test(csp), 'CSP zawiera ws:/wss: -> ' + csp);
+});
+
+test('R3 D10: zmiana hasła – złe obecne 403, walidacja 400, po zmianie stare sesje i sockety unieważnione', async () => {
+  const a = await register('pwd');
+  const login = await api('POST', '/api/auth/login', { username: a.username, password: 'haslo123' });
+  const token2 = login.body.token;
+  assert.equal((await api('POST', '/api/me/password', { currentPassword: 'haslo123', newPassword: 'nowehaslo1' })).status, 401);
+  const wrong = await api('POST', '/api/me/password', { currentPassword: 'zleobecne', newPassword: 'nowehaslo1' }, a.token);
+  assert.equal(wrong.status, 403);
+  const short = await api('POST', '/api/me/password', { currentPassword: 'haslo123', newPassword: '123' }, a.token);
+  assert.equal(short.status, 400);
+  assert.equal((await api('GET', '/api/me', undefined, a.token)).status, 200, 'nieudana zmiana nie unieważnia sesji');
+
+  const c = await connectWs(a.token);
+  try {
+    await c.waitFor((m) => m.type === 'hello');
+    const closing = new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('socket nie zamknięty')), 3000);
+      c.ws.once('close', (code) => { clearTimeout(t); resolve(code); });
+    });
+    const ok = await api('POST', '/api/me/password', { currentPassword: 'haslo123', newPassword: 'nowehaslo1' }, a.token);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.ok, true);
+    assert.equal(typeof ok.body.token, 'string');
+    assert.equal(await closing, 4001);
+
+    assert.equal((await api('GET', '/api/me', undefined, a.token)).status, 401);
+    assert.equal((await api('GET', '/api/me', undefined, token2)).status, 401);
+    const me = await api('GET', '/api/me', undefined, ok.body.token);
+    assert.equal(me.status, 200);
+    assert.equal(me.body.user.id, a.id);
+
+    assert.equal((await api('POST', '/api/auth/login', { username: a.username, password: 'haslo123' })).status, 401);
+    const nl = await api('POST', '/api/auth/login', { username: a.username, password: 'nowehaslo1' });
+    assert.equal(nl.status, 200);
+  } finally { await c.close(); }
 });

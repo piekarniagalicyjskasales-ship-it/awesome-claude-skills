@@ -62,7 +62,7 @@ D2 kwota plików / sprzątanie sierot; D5 wygasanie sesji, tokeny jawne w bazie;
 - Decyzja: upload — auth i kontrola Content-Length przed parsowaniem body, max 2 równoległe, globalny limit dysku 5 GB (507).
 - Decyzja: frontend — backoff resetowany dopiero po `hello`, jitter, baner po 5 porażkach; 4008 przy >10 połączeniach.
 - Decyzja: odłożone D7 (SEED przy npm start), D9 (≤30 s życia socketu wygasłej sesji), skalowanie poziome — README.
-| R3-B Backend | W TOKU | src/, server.js, README, compose | wznowiony T1 |
+| R3-B Backend | DONE | src/, server.js, README, compose, Dockerfile | dodatkowo limiter zmiany hasła; kontroler: 100/100 ×3 |
 | R3-F Frontend | W TOKU | public/ | wznowiony T2 |
-| R3-T Testy | W TOKU | tests/ | wznowiony T3 |
+| R3-T Testy | DONE | tests/ | +16 testów R3; registerRateLimit: false|liczba (decyzja kontrolera) |
 | R3-V Ponowna weryfikacja recenzenta R2 | CZEKA | out/R3-V.md | po R3-B/F/T |

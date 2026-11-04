@@ -17,12 +17,16 @@
       <button type="button" role="tab" id="tab-login" class="tab" aria-selected="true">Logowanie</button>
       <button type="button" role="tab" id="tab-register" class="tab" aria-selected="false">Rejestracja</button>
     </div>
+    <p id="auth-note" class="auth-note" hidden>Rejestracja wyłączona — poproś administratora o konto.</p>
     <form id="auth-form" novalidate>
       <label class="field">Nazwa użytkownika
         <input id="f-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
       </label>
       <label class="field" id="f-display-wrap" hidden>Wyświetlana nazwa
         <input id="f-display" name="displayName" maxlength="40" autocomplete="nickname">
+      </label>
+      <label class="field" id="f-invite-wrap" hidden>Kod zaproszenia
+        <input id="f-invite" name="inviteCode" autocomplete="off" spellcheck="false">
       </label>
       <label class="field">Hasło
         <input id="f-password" name="password" type="password" autocomplete="current-password" required>

@@ -216,8 +216,21 @@
 
   // ---------- Ekran logowania ----------
   let authMode = 'login';
+  let regMode = 'open';
+  async function loadConfig() {
+    try {
+      const d = await api('GET', '/api/config', undefined, { noLogout: true });
+      if (['open', 'code', 'closed'].includes(d.registration)) regMode = d.registration;
+    } catch (e) { /* domyślnie open */ }
+    const closed = regMode === 'closed';
+    $('#tab-register').hidden = closed;
+    $('#auth-note').hidden = !closed;
+    if (closed && authMode === 'register') setAuthMode('login'); else setAuthMode(authMode);
+  }
   function setAuthMode(m) {
+    if (m === 'register' && regMode === 'closed') m = 'login';
     authMode = m;
+    $('#f-invite-wrap').hidden = !(m === 'register' && regMode === 'code');
     $('#tab-login').setAttribute('aria-selected', String(m === 'login'));
     $('#tab-register').setAttribute('aria-selected', String(m === 'register'));
     $('#f-display-wrap').hidden = m !== 'register';
@@ -234,6 +247,7 @@
     $('#app').hidden = true;
     $('#auth').hidden = false;
     document.title = 'Kanalik';
+    loadConfig();
   }
 
   async function submitAuth(ev) {
@@ -245,6 +259,11 @@
     if (authMode === 'register') {
       const dn = $('#f-display').value.trim();
       if (dn) body.displayName = dn;
+      if (regMode === 'code') {
+        const code = $('#f-invite').value.trim();
+        if (!code) { showAuthError('Podaj kod zaproszenia.'); return; }
+        body.inviteCode = code;
+      }
     }
     const btn = $('#auth-submit');
     btn.disabled = true;
@@ -277,6 +296,8 @@
     for (const m of state.typing.values()) for (const t of m.values()) clearTimeout(t.timer);
     state.typing = new Map();
     state.wsEverOpen = false;
+    state.wsFailures = 0;
+    state.pwChanging = false;
   }
 
   function logout(local) {
@@ -1299,7 +1320,40 @@
           if (ex.status !== 401) { err.textContent = ex.message; err.hidden = false; }
         }
       });
-      dlg.append(form);
+      const cur = h('input', { type: 'password', autocomplete: 'current-password', maxlength: '200' });
+      const nw = h('input', { type: 'password', autocomplete: 'new-password', maxlength: '200' });
+      const rep = h('input', { type: 'password', autocomplete: 'new-password', maxlength: '200' });
+      const pwErr = h('p', { class: 'form-error', role: 'alert', hidden: true });
+      const pwForm = h('form', { class: 'pw-section', novalidate: true },
+        h('h3', { text: 'Zmień hasło' }),
+        h('label', { class: 'field' }, 'Obecne hasło', cur),
+        h('label', { class: 'field' }, 'Nowe hasło', nw),
+        h('label', { class: 'field' }, 'Powtórz nowe hasło', rep),
+        pwErr,
+        h('button', { type: 'submit', class: 'btn', text: 'Zmień hasło' }));
+      pwForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        pwErr.hidden = true;
+        const fail = (m) => { pwErr.textContent = m; pwErr.hidden = false; };
+        if (!cur.value) return fail('Podaj obecne hasło.');
+        if (nw.value.length < 6) return fail('Nowe hasło musi mieć co najmniej 6 znaków.');
+        if (nw.value !== rep.value) return fail('Nowe hasła nie są takie same.');
+        state.pwChanging = true; // serwer zamknie sockety (4001) - nie reaguj na to starym tokenem
+        try {
+          const d = await api('POST', '/api/me/password', { currentPassword: cur.value, newPassword: nw.value });
+          state.token = d.token;
+          setToken(d.token);
+          state.pwChanging = false;
+          closeWs();
+          connectWs();
+          close();
+          toast('Hasło zmienione — wylogowano inne urządzenia');
+        } catch (ex) {
+          state.pwChanging = false;
+          if (ex.status !== 401 || !state.token) { if (state.token) { fail(ex.message); if (!state.ws) connectWs(); } }
+        }
+      });
+      dlg.append(form, pwForm);
       return name;
     });
   }
@@ -1321,20 +1375,42 @@
   function closeWs() {
     clearInterval(state.pingTimer);
     clearTimeout(state.reconnectTimer);
+    connectSeq++; // unieważnij trwające pobieranie biletu
     const ws = state.ws;
     state.ws = null;
+    state.wsFailures = 0;
+    hideConnBanner();
     if (ws) { try { ws.close(); } catch (e) { /* ignoruj */ } }
   }
+
+  // Baner stanu połączenia (brak połączenia / za dużo kart)
+  function showConnBanner(text, btnLabel, onClick) {
+    let b = $('#conn-banner');
+    if (!b) {
+      b = h('div', { id: 'conn-banner', class: 'conn-banner', role: 'status' });
+      $('#main').prepend(b);
+    }
+    b.replaceChildren(h('span', { text }), h('button', { type: 'button', class: 'btn small', onclick: onClick, text: btnLabel }));
+  }
+  function hideConnBanner() { const b = $('#conn-banner'); if (b) b.remove(); }
+
   let connectSeq = 0;
-  function scheduleReconnect() {
-    const delay = state.backoff * 1000;
-    state.backoff = Math.min(state.backoff * 2, 15);
+  // Każde nieudane połączenie (bez odebranego "hello") = porażka: wykładniczy backoff 1..30 s +/-30% jitter.
+  function wsFailed() {
+    if (!state.token) return;
+    state.wsFailures = (state.wsFailures || 0) + 1;
+    const base = Math.min(Math.pow(2, state.wsFailures - 1), 30) * 1000;
+    const delay = Math.round(base * (0.7 + Math.random() * 0.6));
+    if (state.wsFailures >= 5) {
+      showConnBanner('Brak połączenia z serwerem — ponawiam…', 'Połącz teraz', () => { clearTimeout(state.reconnectTimer); connectWs(); });
+    }
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = setTimeout(connectWs, delay);
   }
   async function connectWs() {
     if (!state.token) return;
     clearTimeout(state.reconnectTimer);
+    if (state.ws) return;
     const seq = ++connectSeq;
     const tok = state.token;
     let ticket;
@@ -1342,39 +1418,46 @@
       // jednorazowy bilet; 401 => api() samo wyloguje do ekranu logowania
       ticket = (await api('POST', '/api/ws-ticket')).ticket;
     } catch (e) {
-      if (e.status !== 401 && state.token === tok && seq === connectSeq) scheduleReconnect();
+      if (e.status !== 401 && state.token === tok && seq === connectSeq) wsFailed();
       return;
     }
     if (!state.token || state.token !== tok || seq !== connectSeq || state.ws) return;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(proto + '//' + location.host + '/ws?ticket=' + encodeURIComponent(ticket));
     state.ws = ws;
-    ws.onopen = () => {
-      state.backoff = 1;
-      state.ticketRetried = false;
-      clearInterval(state.pingTimer);
-      state.pingTimer = setInterval(() => wsSend({ type: 'ping' }), 25000);
-      if (state.wsEverOpen) refreshAfterReconnect();
-      state.wsEverOpen = true;
-    };
+    let gotHello = false;
     ws.onmessage = (e) => {
       let d;
       try { d = JSON.parse(e.data); } catch (err) { return; }
-      if (d && d.type) onWs(d);
+      if (!d || !d.type) return;
+      if (d.type === 'hello' && !gotHello) {
+        gotHello = true;
+        state.wsFailures = 0;
+        hideConnBanner();
+        clearInterval(state.pingTimer);
+        state.pingTimer = setInterval(() => wsSend({ type: 'ping' }), 25000);
+        if (state.wsEverOpen) refreshAfterReconnect();
+        state.wsEverOpen = true;
+      }
+      onWs(d);
     };
     ws.onclose = (ev) => {
-      clearInterval(state.pingTimer);
       if (state.ws !== ws) return;
+      clearInterval(state.pingTimer);
       state.ws = null;
-      if (!state.token) return;
-      if (ev.code === 4001) {
-        // spróbuj raz z nowym biletem; 401 przy pobieraniu biletu wyloguje
-        if (state.ticketRetried) { logout(true); return; }
-        state.ticketRetried = true;
-        connectWs();
+      if (!state.token || state.pwChanging) return;
+      if (ev.code === 4008) {
+        showConnBanner('Za dużo otwartych kart — zamknij inne karty Kanalika.', 'Połącz ponownie', () => { state.wsFailures = 0; hideConnBanner(); connectWs(); });
         return;
       }
-      scheduleReconnect();
+      if (gotHello) {
+        // połączenie działało i zostało zamknięte: spróbuj od razu (401 przy bilecie wyloguje)
+        if (ev.code === 4001) { connectWs(); return; }
+        state.wsFailures = 0;
+        wsFailed();
+        return;
+      }
+      wsFailed();
     };
     ws.onerror = () => { /* onclose obsłuży ponowne łączenie */ };
   }

@@ -3,17 +3,39 @@ const { WebSocketServer } = require('ws');
 const crypto = require('node:crypto');
 
 const TICKET_TTL_MS = 30000;
+const MAX_TICKETS_PER_SESSION = 20;
+const MAX_CONNS_PER_USER = 10;
 
 function createRealtime({ server, m }) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
   const conns = new Map(); // userId -> Set<ws>
-  const tickets = new Map(); // ticket -> { userId, tokenHash, expiresAt }
+  const tickets = new Map(); // ticket -> { userId, tokenHash, expiresAt } (kolejność wstawiania = kolejność wygasania)
+  const ticketsByHash = new Map(); // tokenHash -> string[] (aktywne bilety, najstarszy pierwszy)
+  function removeTicket(ticket) {
+    const info = tickets.get(ticket);
+    if (!info) return;
+    tickets.delete(ticket);
+    const arr = ticketsByHash.get(info.tokenHash);
+    if (arr) {
+      const i = arr.indexOf(ticket);
+      if (i >= 0) arr.splice(i, 1);
+      if (arr.length === 0) ticketsByHash.delete(info.tokenHash);
+    }
+  }
+  function sweepTickets() {
+    const t = Date.now();
+    for (const [k, v] of tickets) {
+      if (v.expiresAt >= t) break;
+      removeTicket(k);
+    }
+  }
+  const ticketSweeper = setInterval(sweepTickets, 10000);
+  ticketSweeper.unref();
   const typingSeen = new Map(); // "user:channel:parent" -> timestamp ostatniego eventu
 
   // Heartbeat: co 30 s ping; socket bez pong od poprzedniego cyklu jest zamykany.
   const heartbeat = setInterval(() => {
     const t = Date.now();
-    for (const [k, v] of tickets) if (v.expiresAt < t) tickets.delete(k);
     for (const set of conns.values()) {
       for (const ws of set) {
         const s = m.get('SELECT expires_at FROM sessions WHERE token_hash = ?', ws.tokenHash);
@@ -65,7 +87,7 @@ function createRealtime({ server, m }) {
     if (url.pathname !== '/ws') { socket.destroy(); return; }
     const ticket = url.searchParams.get('ticket') || '';
     const info = /^[a-f0-9]{64}$/.test(ticket) ? tickets.get(ticket) : null;
-    if (info) tickets.delete(ticket); // jednorazowy
+    if (info) removeTicket(ticket); // jednorazowy
     wss.handleUpgrade(req, socket, head, (ws) => {
       const row = info && info.expiresAt >= Date.now()
         ? m.get(`SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
@@ -77,21 +99,23 @@ function createRealtime({ server, m }) {
   });
 
   function createTicket(userId, tokenHash) {
-    const t = Date.now();
-    for (const [k, v] of tickets) if (v.expiresAt < t) tickets.delete(k);
     const ticket = crypto.randomBytes(32).toString('hex');
-    tickets.set(ticket, { userId, tokenHash, expiresAt: t + TICKET_TTL_MS });
+    tickets.set(ticket, { userId, tokenHash, expiresAt: Date.now() + TICKET_TTL_MS });
+    let arr = ticketsByHash.get(tokenHash);
+    if (!arr) { arr = []; ticketsByHash.set(tokenHash, arr); }
+    arr.push(ticket);
+    while (arr.length > MAX_TICKETS_PER_SESSION) removeTicket(arr[0]);
     return ticket;
   }
   function dropSession(tokenHash) {
     for (const set of conns.values()) {
       for (const ws of set) if (ws.tokenHash === tokenHash) ws.close(4001, 'Wylogowano');
     }
-    for (const [k, v] of tickets) if (v.tokenHash === tokenHash) tickets.delete(k);
+    for (const t of [...(ticketsByHash.get(tokenHash) || [])]) removeTicket(t);
   }
   function dropUser(userId) {
     for (const ws of conns.get(userId) || []) ws.close(4001, 'Wylogowano');
-    for (const [k, v] of tickets) if (v.userId === userId) tickets.delete(k);
+    for (const [k, v] of [...tickets]) if (v.userId === userId) removeTicket(k);
   }
 
   function onConnection(ws, userRow, tokenHash) {
@@ -100,6 +124,7 @@ function createRealtime({ server, m }) {
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
     let set = conns.get(uid);
+    if (set && set.size >= MAX_CONNS_PER_USER) { ws.close(4008, 'Zbyt wiele połączeń'); return; }
     const first = !set || set.size === 0;
     if (!set) { set = new Set(); conns.set(uid, set); }
     set.add(ws);
@@ -133,10 +158,16 @@ function createRealtime({ server, m }) {
     });
   }
 
-  function close() {
+  async function close() {
     clearInterval(heartbeat);
-    for (const set of conns.values()) for (const ws of set) ws.terminate();
-    return new Promise((resolve) => wss.close(() => resolve()));
+    clearInterval(ticketSweeper);
+    for (const set of conns.values()) for (const ws of set) { try { ws.close(1001, 'Restart serwera'); } catch { /* ignoruj */ } }
+    for (const ws of wss.clients) { try { ws.close(1001, 'Restart serwera'); } catch { /* ignoruj */ } }
+    // krótki czas na uściśnięcie dłoni zamknięcia, potem wymuszenie
+    const deadline = Date.now() + 1500;
+    while (wss.clients.size > 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    for (const ws of wss.clients) ws.terminate();
+    await new Promise((resolve) => wss.close(() => resolve()));
   }
 
   return { isOnline, sendUser, sendAll, sendMembers, sendChannelToMembers, sendChannelToAll, sendChannelEvent, createTicket, dropSession, dropUser, close };

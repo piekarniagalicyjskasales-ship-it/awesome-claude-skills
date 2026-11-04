@@ -45,6 +45,12 @@ Aplikacja nasłuchuje na `http://localhost:3000`.
 | `TRUST_PROXY` | wyłączone | np. `1` lub `loopback` — za reverse proxy; limiter logowań używa wtedy prawdziwego IP klienta |
 | `SESSION_TTL_DAYS` | `30` | ważność sesji (przesuwana przy użyciu) |
 | `UPLOAD_QUOTA_MB` | `100` | kwota plików na użytkownika |
+| `UPLOADS_TOTAL_MB` | `5000` | globalny limit miejsca na pliki (po przekroczeniu 507) |
+| `REGISTRATION` | `open` (w Dockerze `code`) | `open`, `code` (wymaga kodu zaproszenia) lub `closed` |
+| `REGISTRATION_CODE` | — | kod zaproszenia, min. 8 znaków; wymagany przy `REGISTRATION=code` (bez niego serwer się nie uruchomi) |
+| `REGISTER_LIMIT_PER_HOUR` | `5` | maks. udanych rejestracji na IP na godzinę (429 po przekroczeniu) |
+
+Niepoprawne wartości (liczby < 1, nieznany `REGISTRATION`, `SEED` inne niż `true`/`false`) kończą start czytelnym komunikatem i kodem wyjścia 1.
 
 ## Testy
 
@@ -77,6 +83,8 @@ Wszystkie trasy `/api/*` poza rejestracją i logowaniem wymagają nagłówka `Au
 | POST `/api/auth/logout-all` | wylogowanie ze wszystkich urządzeń (zamyka też wszystkie WebSockety użytkownika) |
 | POST `/api/ws-ticket` | jednorazowy bilet do WebSocket (ważny 30 s) |
 | GET `/api/me/storage` | `{usedBytes, quotaBytes}` — zajęte miejsce na pliki |
+| POST `/api/me/password` | zmiana hasła `{currentPassword, newPassword}`; kończy wszystkie sesje, zwraca `{ok, token}` nowej sesji |
+| GET `/api/config` | `{registration}` bez autoryzacji (tryb rejestracji: `open`/`code`/`closed`) |
 | GET `/api/health` | `{ok:true}` bez autoryzacji (healthcheck) |
 | GET/PATCH `/api/me` | profil (displayName, status) |
 | GET `/api/users` | wszyscy użytkownicy |
@@ -96,7 +104,7 @@ Wszystkie trasy `/api/*` poza rejestracją i logowaniem wymagają nagłówka `Au
 
 ### WebSocket
 
-Połączenie: najpierw `POST /api/ws-ticket` (z nagłówkiem Bearer), potem `ws://host/ws?ticket=<ticket>`. Bilet jest jednorazowy i ważny 30 s; brak, zły, zużyty lub wygasły bilet (a także parametr `token`) powoduje zamknięcie kodem 4001. Wylogowanie lub wygaśnięcie sesji zamyka jej sockety kodem 4001.
+Limity: 20 aktywnych biletów na sesję, 30 biletów na minutę na sesję (429), 10 jednoczesnych połączeń na użytkownika (nadmiarowe zamykane kodem 4008). Połączenie: najpierw `POST /api/ws-ticket` (z nagłówkiem Bearer), potem `ws://host/ws?ticket=<ticket>`. Bilet jest jednorazowy i ważny 30 s; brak, zły, zużyty lub wygasły bilet (a także parametr `token`) powoduje zamknięcie kodem 4001. Wylogowanie lub wygaśnięcie sesji zamyka jej sockety kodem 4001.
 
 | Kierunek | Zdarzenie |
 |---|---|
@@ -105,47 +113,76 @@ Połączenie: najpierw `POST /api/ws-ticket` (z nagłówkiem Bearer), potem `ws:
 
 Zdarzenia kanałowe trafiają wyłącznie do członków danego kanału.
 
+## Rejestracja
+
+Tryb ustawia `REGISTRATION`:
+
+- `open` — każdy może założyć konto (domyślnie przy `npm start`)
+- `code` — rejestracja wymaga pola `inviteCode` zgodnego z `REGISTRATION_CODE` (błędny kod: 403); tryb domyślny w Dockerze
+- `closed` — rejestracja wyłączona (403); konta trzeba utworzyć wcześniej
+
+Dodatkowo, niezależnie od trybu: max `REGISTER_LIMIT_PER_HOUR` udanych rejestracji na IP na godzinę.
+
+## Reverse proxy i `TRUST_PROXY`
+
+Aplikacja nie obsługuje HTTPS — wystaw ją za reverse proxy z TLS (Caddy, nginx). Port aplikacji nie może być dostępny publicznie: wiąż go z `127.0.0.1` (`HOST=127.0.0.1`) albo trzymaj w sieci compose.
+
+| Sytuacja | `TRUST_PROXY` |
+|---|---|
+| bez proxy (aplikacja bezpośrednio) | nie ustawiaj |
+| jedno proxy (Caddy/nginx) przed aplikacją | `1` |
+| dwa proxy (np. Cloudflare + Caddy) | `2` |
+
+Skutki błędnej konfiguracji: `true` ufa nagłówkowi `X-Forwarded-For` od każdego klienta (limiter logowań i rejestracji da się obejść podrabianym IP; serwer ostrzega przy starcie); ustawienie `1`, gdy aplikacja jest dostępna bezpośrednio, ma ten sam skutek; brak `TRUST_PROXY` za proxy sprawia, że wszyscy klienci mają IP proxy, więc 10 błędnych prób jednej osoby blokuje logowanie danego konta wszystkim.
+
 ## Bezpieczeństwo i znane ograniczenia
 
 Zabezpieczenia:
 
-- limit nieudanych logowań: 10 prób w 10 minut na parę IP + nazwa użytkownika, potem 429 (także dla poprawnego hasła); udane logowanie zeruje licznik; hasła haszowane asynchronicznie (scrypt), maks. 200 znaków
+- limit nieudanych logowań: 10 prób w 10 minut na parę IP + nazwa użytkownika, potem 429 (także dla poprawnego hasła); udane logowanie zeruje licznik; hasła haszowane asynchronicznie (scrypt), maks. 200 znaków; zmiana hasła kończy wszystkie sesje
+- rejestracja: tryby `open`/`code`/`closed` i limit na IP
 - sesje: w bazie leży tylko `SHA-256(token)`; ważność przesuwana (`SESSION_TTL_DAYS`, zapis do bazy najwyżej raz na godzinę), wygasłe sesje są sprzątane; `logout-all` kończy wszystkie sesje użytkownika
-- WebSocket bez tokenu w URL: jednorazowe bilety (30 s, tylko w pamięci serwera); heartbeat (ping co 30 s), limit ramki 16 KB, zamykanie socketów wygasłych lub wylogowanych sesji
-- pliki: kwota na użytkownika (`UPLOAD_QUOTA_MB`, 413 po przekroczeniu); usunięcie wiadomości usuwa jej załącznik; pliki-sieroty starsze niż 24 h są sprzątane przy starcie i co godzinę
-- Content-Security-Policy (`script-src 'self'`, `frame-ancestors 'none'` itd.), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`; pliki użytkowników są serwowane z własnym CSP `sandbox`
+- WebSocket bez tokenu w URL: jednorazowe bilety (30 s, tylko w pamięci serwera, limity na sesję); heartbeat (ping co 30 s), limit ramki 16 KB, limit 10 połączeń na użytkownika, zamykanie socketów wygasłych lub wylogowanych sesji
+- pliki: upload wymaga uwierzytelnienia przed odczytem body, sprawdza `Content-Length` względem kwoty (413) i miejsca na serwerze (507), maks. 2 równoległe uploady na użytkownika (429); kwota na użytkownika (`UPLOAD_QUOTA_MB`); usunięcie wiadomości usuwa jej załącznik; pliki-sieroty starsze niż 24 h (także pliki bez wiersza w bazie) są sprzątane przy starcie i co godzinę
+- Content-Security-Policy (`script-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'` itd.), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`; `Cache-Control: no-store` dla `/api/*`; pliki użytkowników są serwowane z własnym CSP `sandbox`
 - limit JSON 100 kB (8 MB tylko dla wysyłania plików)
-- graceful shutdown na SIGTERM/SIGINT; `GET /api/health` do healthchecków
+- łagodne zamykanie na SIGTERM/SIGINT: koniec przyjmowania połączeń, WebSockety kodem 1001, do 10 s na żądania w toku, potem zamknięcie bazy; `GET /api/health` do healthchecków
 
 Znane ograniczenia:
 
-- limiter logowań i bilety WebSocket działają w pamięci jednego procesu (nie przeżywają restartu ani nie działają między instancjami)
-- aplikacja nie terminuje HTTPS — w internecie uruchamiaj ją za reverse proxy z TLS (i ustaw `TRUST_PROXY`)
+- jedna instancja: bilety WebSocket i limity działają w pamięci procesu, więc aplikacji nie da się skalować poziomo (kilka instancji za load balancerem nie zadziała poprawnie)
+- `SEED` domyślnie `true` przy `npm start` (wygoda lokalna: konta `anna`/`bartek` z hasłem `haslo123`); w Dockerze domyślnie `false`. Przed wystawieniem poza localhost ustaw `SEED=false`
+- socket wygasłej sesji może żyć do 30 s (do najbliższego sprawdzenia heartbeat)
+- aplikacja nie terminuje HTTPS — patrz sekcja o reverse proxy
 
 ## Docker
 
-Gotowy obraz zawiera aplikację z domyślnymi ustawieniami produkcyjnymi: dane (baza i załączniki) w wolumenie `/data`, działa jako użytkownik `node`, konta demo wyłączone (`SEED=false`), healthcheck na `/api/health`.
+Gotowy obraz zawiera aplikację z domyślnymi ustawieniami produkcyjnymi: dane (baza i załączniki) w wolumenie `/data`, działa jako użytkownik `node`, konta demo wyłączone (`SEED=false`), rejestracja z kodem zaproszenia (`REGISTRATION=code`), healthcheck na `/api/health`.
 
 ### Uruchomienie
 
+Ustaw kod zaproszenia (min. 8 znaków) — bez niego kontener nie wystartuje i w logach zobaczysz komunikat o błędzie konfiguracji:
+
 ```
-docker compose up -d --build
+REGISTRATION_CODE='tajny-kod-zespolu' docker compose up -d --build
 ```
 
-Aplikacja jest dostępna na `http://localhost:3000` (port jest domyślnie przypięty tylko do `127.0.0.1` — publicznie udostępniaj ją przez reverse proxy z TLS).
+(albo wpisz `REGISTRATION_CODE=...` do pliku `.env` obok `docker-compose.yml`; `REGISTRATION=open|closed` zmienia tryb).
+
+Aplikacja jest dostępna na `http://localhost:3000` (port jest domyślnie przypięty tylko do `127.0.0.1` — publicznie udostępniaj ją przez reverse proxy z TLS; w compose ustawiono `TRUST_PROXY=1`).
 
 ### Wersja z HTTPS (Caddy)
 
 ```
 cp deploy/Caddyfile.example deploy/Caddyfile
-DOMAIN=czat.firma.pl docker compose --profile https up -d --build
+DOMAIN=czat.firma.pl REGISTRATION_CODE='tajny-kod-zespolu' docker compose --profile https up -d --build
 ```
 
 Wymagania: domena wskazuje na serwer, porty 80 i 443 (TCP i UDP dla HTTP/3) są otwarte. Caddy sam pobiera i odnawia certyfikat.
 
 ### Pierwsze konto
 
-Konta demo są wyłączone (`SEED=false`). Pierwsze konto utwórz przez rejestrację w przeglądarce.
+Konta demo są wyłączone (`SEED=false`). Pierwsze konto utwórz przez rejestrację w przeglądarce, podając kod zaproszenia (`REGISTRATION_CODE`).
 
 ### Kopia zapasowa
 

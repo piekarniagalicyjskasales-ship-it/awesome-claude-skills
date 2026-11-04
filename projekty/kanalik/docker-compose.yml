@@ -12,6 +12,9 @@ services:
       SESSION_TTL_DAYS: "30"
       UPLOAD_QUOTA_MB: "100"
       SEED: "${SEED:-false}"
+      REGISTRATION: "${REGISTRATION:-code}"
+      REGISTRATION_CODE: "${REGISTRATION_CODE:-}"
+      UPLOADS_TOTAL_MB: "${UPLOADS_TOTAL_MB:-5000}"
 
   caddy:
     image: caddy:2-alpine

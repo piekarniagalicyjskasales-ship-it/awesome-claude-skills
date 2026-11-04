@@ -17,7 +17,8 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     DB_PATH=/data/kanalik.db \
     UPLOADS_DIR=/data/uploads \
-    SEED=false
+    SEED=false \
+    REGISTRATION=code
 
 RUN mkdir -p /data/uploads && chown -R node:node /data
 USER node
