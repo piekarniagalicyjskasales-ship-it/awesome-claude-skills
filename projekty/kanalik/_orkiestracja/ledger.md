@@ -50,7 +50,7 @@ D2 kwota plików / sprzątanie sierot; D5 wygasanie sesji, tokeny jawne w bazie;
 | Zadanie | Status | Plik | Uwagi |
 |---|---|---|---|
 | R2-B Backend | DONE | src/, server.js, README | migracja starej bazy OK; dodatkowo: wygasłe sesje zamykają WS w heartbeat |
-| R2-F Frontend | DONE → diagnoza flaky | public/ | bilety WS, storage, logout-all; E2E 1/3 FAIL scen. 12 (B nie dostał wiadomości w 3 s) — wznowiony T2 do diagnozy |
+| R2-F Frontend | DONE | public/ | bilety WS, storage, logout-all. Flaky scen. 12 = prawdziwy błąd: druga szybko wpisana wiadomość ginęła (guard `sending` + czyszczenie pola po POST) — naprawione w makeComposer().send; kontroler: E2E 15/15 ×3 |
 | R2-T Testy | DONE | tests/ | 84/84 ×2 (kontroler) |
 | R2-D Docker | DONE | Dockerfile, compose, deploy/, README#Docker | obraz 248 MB, healthy, uid 1000, trwałość OK, stop 0,24 s. Kontroler: Dockerfile repo ≠ testowy tylko linią CA sandboxa; stack compose --profile https (Caddy, DOMAIN=localhost): 308→https, /api/health OK, wss + bilet → hello, limiter za proxy 429 przy 11. próbie |
 | R2-REV Recenzja R2 | W TOKU (fala B) | out/R2-REV.md | opus, port 3500 |
