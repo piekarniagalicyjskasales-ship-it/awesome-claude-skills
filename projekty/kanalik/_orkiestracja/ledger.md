@@ -55,3 +55,14 @@ D2 kwota plików / sprzątanie sierot; D5 wygasanie sesji, tokeny jawne w bazie;
 | R2-D Docker | DONE | Dockerfile, compose, deploy/, README#Docker | obraz 248 MB, healthy, uid 1000, trwałość OK, stop 0,24 s. Kontroler: Dockerfile repo ≠ testowy tylko linią CA sandboxa; stack compose --profile https (Caddy, DOMAIN=localhost): 308→https, /api/health OK, wss + bilet → hello, limiter za proxy 429 przy 11. próbie |
 | R2-REV Recenzja R2 | W TOKU (fala B) | out/R2-REV.md | opus, port 3500 |
 - Decyzja: `deploy/Caddyfile` w .gitignore (konfiguracja lokalna użytkownika; w repo tylko .example). Koszt: niski.
+| R2-REV Recenzja R2 | DONE | out/R2-REV.md | Krytyczne 0, Ważne 4, Drobne 12; werdykt: NIE do internetu przed W1–W3; zmiany auth R2 poprawne |
+
+## Runda R3 — poprawki po R2-REV (briefs/R3.md, KONTRAKT v3)
+- Decyzja: rejestracja `open|code|closed`, w Dockerze `code` z REGISTRATION_CODE (min 8 znaków, bez niego serwer nie startuje) + limit 5 rejestracji/IP/h — dlaczego: otwarta rejestracja w internecie = obcy w czacie zespołu i obejście kwot. Koszt pomyłki: niski (zmiana env).
+- Decyzja: upload — auth i kontrola Content-Length przed parsowaniem body, max 2 równoległe, globalny limit dysku 5 GB (507).
+- Decyzja: frontend — backoff resetowany dopiero po `hello`, jitter, baner po 5 porażkach; 4008 przy >10 połączeniach.
+- Decyzja: odłożone D7 (SEED przy npm start), D9 (≤30 s życia socketu wygasłej sesji), skalowanie poziome — README.
+| R3-B Backend | W TOKU | src/, server.js, README, compose | wznowiony T1 |
+| R3-F Frontend | W TOKU | public/ | wznowiony T2 |
+| R3-T Testy | W TOKU | tests/ | wznowiony T3 |
+| R3-V Ponowna weryfikacja recenzenta R2 | CZEKA | out/R3-V.md | po R3-B/F/T |
