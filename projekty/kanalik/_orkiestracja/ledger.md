@@ -39,3 +39,17 @@
 
 ## Znane ograniczenia (świadomie odłożone)
 D2 kwota plików / sprzątanie sierot; D5 wygasanie sesji, tokeny jawne w bazie; D11 token w URL WebSocket.
+
+## Runda R2 — wdrożenie publiczne (prośba użytkownika: „zrób dokera i wykonaj odłożone punkty”)
+- Decyzja: D11 → jednorazowe bilety WS (`POST /api/ws-ticket`, 30 s), `?token=` usunięty — dlaczego: token sesji nie trafia do logów proxy; bilet jest bezużyteczny po użyciu. Koszt: niski.
+- Decyzja: D5 → w bazie tylko SHA-256 tokenu, wygasanie przesuwane 30 dni (SESSION_TTL_DAYS), migracja kasuje stare sesje (wszyscy logują się ponownie), nowe `logout-all`. Koszt: niski.
+- Decyzja: D2 → kwota 100 MB/użytkownik (UPLOAD_QUOTA_MB), plik usuwany razem z wiadomością, sieroty > 24 h sprzątane co godzinę. Koszt: niski.
+- Decyzja: w Dockerze SEED=false (konta demo ze znanym hasłem w internecie = luka), port 127.0.0.1:3000, HTTPS przez Caddy w profilu `https`, TRUST_PROXY=1. Koszt pomyłki: niski.
+- Decyzja: dockerd uruchomiony ręcznie w kontenerze sesji (był zainstalowany, nie działał) — tylko do testu obrazu.
+
+| Zadanie | Status | Plik | Uwagi |
+|---|---|---|---|
+| R2-B Backend | W TOKU (fala A) | src/, server.js, README | wznowiony T1 |
+| R2-F Frontend | W TOKU (fala A) | public/ | wznowiony T2 |
+| R2-T Testy | W TOKU (fala A) | tests/ | wznowiony T3 |
+| R2-D Docker | CZEKA (fala B, po R2-B) | Dockerfile, compose, deploy/ | briefs/R2-D.md |
