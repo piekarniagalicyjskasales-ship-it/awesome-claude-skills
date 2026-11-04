@@ -67,3 +67,9 @@ D2 kwota plików / sprzątanie sierot; D5 wygasanie sesji, tokeny jawne w bazie;
 | R3-T Testy | DONE | tests/ | +16 testów R3; registerRateLimit: false|liczba (decyzja kontrolera) |
 | R3-V Ponowna weryfikacja recenzenta R2 | CZEKA | out/R3-V.md | po R3-B/F/T |
 | R3-D Docker (kontroler) | DONE | — | obraz 248 MB z kodem R3; compose bez REGISTRATION_CODE → czytelny błąd i brak startu; z kodem: /api/config=code, zły/brak kodu 403, dobry 201, anna 401, no-store, connect-src 'self' |
+| R3-V Weryfikacja recenzenta | DONE | out/R3-V.md | 15/15 znalezisk R2 NAPRAWIONE; nowe: Ważne 2 (W-N1 brak indeksu messages(file_id) → zamrożenie 21 s; W-N2 brak limitu prób kodu zaproszenia), Drobne 5; UI closed/4008/„Połącz teraz” działa; werdykt: OK za HTTPS po W-N1 i losowym kodzie ≥16 |
+
+## Runda R4 (ostatnia, runda poprawek 2/3 dla bezpieczeństwa) — briefs/R4.md
+- Decyzja: indeks + przegląd indeksów; limiter błędnych kodów 10/IP/15 min; kod min 16 znaków; max 20 sesji/użytkownika; limiter zmiany hasła per sesja; shutdown ≤ 8 s + stop_grace_period 15 s. Koszt: niski.
+| R4-B Backend | W TOKU | src/, README, compose | wznowiony T1 |
+| R4-T Testy | W TOKU | tests/ | wznowiony T3 |
