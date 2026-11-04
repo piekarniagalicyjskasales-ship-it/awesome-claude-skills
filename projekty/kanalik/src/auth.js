@@ -53,6 +53,7 @@ function createLoginLimiter({ max = 10, windowMs = 10 * 60 * 1000 } = {}) {
   };
 }
 
+const hashToken = (token) => crypto.createHash('sha256').update(token).digest('hex');
 const newToken = () => crypto.randomBytes(32).toString('hex');
 
-module.exports = { hashPassword, verifyPassword, hashPasswordAsync, verifyPasswordAsync, verifyDummy, createLoginLimiter, newToken };
+module.exports = { hashPassword, verifyPassword, hashPasswordAsync, verifyPasswordAsync, verifyDummy, createLoginLimiter, newToken, hashToken };

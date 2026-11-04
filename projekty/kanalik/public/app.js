@@ -1034,7 +1034,7 @@
       } catch (e) {
         pending = null;
         renderChip(null);
-        if (e.status !== 401) toast(e.status === 413 ? 'Plik jest za duży (limit 5 MB).' : e.message);
+        if (e.status !== 401) toast(e.message);
       } finally {
         uploading = false;
       }
@@ -1258,9 +1258,27 @@
       const name = h('input', { type: 'text', maxlength: '40', value: state.me.displayName });
       const status = h('input', { type: 'text', maxlength: '100', value: state.me.status || '', placeholder: 'np. Pracuję zdalnie' });
       const err = h('p', { class: 'form-error', role: 'alert', hidden: true });
+      const storage = h('p', { class: 'storage-info', text: 'Wykorzystane miejsce: …' });
+      const bar = h('progress', { class: 'storage-bar', max: '100', value: '0', 'aria-label': 'Wykorzystane miejsce' });
+      api('GET', '/api/me/storage').then((d) => {
+        const mb = (n) => (n / 1024 / 1024).toFixed(1).replace(/\.0$/, '');
+        storage.textContent = 'Wykorzystane miejsce: ' + mb(d.usedBytes) + ' MB z ' + mb(d.quotaBytes) + ' MB';
+        bar.value = d.quotaBytes ? Math.min(100, Math.round(d.usedBytes / d.quotaBytes * 100)) : 0;
+      }).catch(() => { storage.textContent = 'Wykorzystane miejsce: brak danych'; });
+      const logoutAll = h('button', {
+        type: 'button', class: 'btn danger small',
+        onclick: async () => {
+          if (!confirm('Wylogować ze wszystkich urządzeń?')) return;
+          try { await api('POST', '/api/auth/logout-all'); } catch (ex) { if (ex.status !== 401) { toast(ex.message); return; } }
+          logout(true);
+        },
+        text: 'Wyloguj ze wszystkich urządzeń',
+      });
       const form = h('form', { novalidate: true },
         h('label', { class: 'field' }, 'Wyświetlana nazwa', name),
         h('label', { class: 'field' }, 'Status', status),
+        h('div', { class: 'field' }, storage, bar),
+        h('div', { class: 'field' }, logoutAll),
         err,
         h('div', { class: 'modal-actions' },
           h('button', { type: 'button', class: 'btn', onclick: close, text: 'Anuluj' }),
@@ -1304,14 +1322,33 @@
     state.ws = null;
     if (ws) { try { ws.close(); } catch (e) { /* ignoruj */ } }
   }
-  function connectWs() {
+  let connectSeq = 0;
+  function scheduleReconnect() {
+    const delay = state.backoff * 1000;
+    state.backoff = Math.min(state.backoff * 2, 15);
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = setTimeout(connectWs, delay);
+  }
+  async function connectWs() {
     if (!state.token) return;
     clearTimeout(state.reconnectTimer);
+    const seq = ++connectSeq;
+    const tok = state.token;
+    let ticket;
+    try {
+      // jednorazowy bilet; 401 => api() samo wyloguje do ekranu logowania
+      ticket = (await api('POST', '/api/ws-ticket')).ticket;
+    } catch (e) {
+      if (e.status !== 401 && state.token === tok && seq === connectSeq) scheduleReconnect();
+      return;
+    }
+    if (!state.token || state.token !== tok || seq !== connectSeq || state.ws) return;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(proto + '//' + location.host + '/ws?token=' + encodeURIComponent(state.token));
+    const ws = new WebSocket(proto + '//' + location.host + '/ws?ticket=' + encodeURIComponent(ticket));
     state.ws = ws;
     ws.onopen = () => {
       state.backoff = 1;
+      state.ticketRetried = false;
       clearInterval(state.pingTimer);
       state.pingTimer = setInterval(() => wsSend({ type: 'ping' }), 25000);
       if (state.wsEverOpen) refreshAfterReconnect();
@@ -1327,10 +1364,14 @@
       if (state.ws !== ws) return;
       state.ws = null;
       if (!state.token) return;
-      if (ev.code === 4001) { logout(true); return; }
-      const delay = state.backoff * 1000;
-      state.backoff = Math.min(state.backoff * 2, 15);
-      state.reconnectTimer = setTimeout(connectWs, delay);
+      if (ev.code === 4001) {
+        // spróbuj raz z nowym biletem; 401 przy pobieraniu biletu wyloguje
+        if (state.ticketRetried) { logout(true); return; }
+        state.ticketRetried = true;
+        connectWs();
+        return;
+      }
+      scheduleReconnect();
     };
     ws.onerror = () => { /* onclose obsłuży ponowne łączenie */ };
   }

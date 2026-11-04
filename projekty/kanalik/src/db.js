@@ -23,10 +23,13 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
-  token TEXT PRIMARY KEY,
+  token_hash TEXT PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  created_at TEXT NOT NULL
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  last_used_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE TABLE IF NOT EXISTS channels (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
@@ -80,6 +83,9 @@ function openDb(dbPath) {
   db.exec('PRAGMA foreign_keys=ON');
   db.exec('PRAGMA journal_mode=WAL');
   db.exec('PRAGMA busy_timeout=5000');
+  // Migracja: stara tabela sessions trzymała jawny token (kolumna `token`) -> usuń, wszyscy logują się ponownie.
+  const cols = db.prepare('PRAGMA table_info(sessions)').all();
+  if (cols.some((c) => c.name === 'token')) db.exec('DROP TABLE sessions');
   db.exec(SCHEMA);
   return db;
 }

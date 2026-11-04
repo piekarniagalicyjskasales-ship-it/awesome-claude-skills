@@ -40,6 +40,11 @@ Aplikacja nasłuchuje na `http://localhost:3000`.
 | `PORT` | `3000` | port HTTP/WebSocket |
 | `DB_PATH` | `./data/kanalik.db` | plik bazy SQLite |
 | `UPLOADS_DIR` | `./data/uploads` | katalog załączników |
+| `HOST` | `0.0.0.0` | adres nasłuchiwania |
+| `SEED` | `true` | `false` wyłącza konta demo i wiadomości powitalne |
+| `TRUST_PROXY` | wyłączone | np. `1` lub `loopback` — za reverse proxy; limiter logowań używa wtedy prawdziwego IP klienta |
+| `SESSION_TTL_DAYS` | `30` | ważność sesji (przesuwana przy użyciu) |
+| `UPLOAD_QUOTA_MB` | `100` | kwota plików na użytkownika |
 
 ## Testy
 
@@ -69,6 +74,10 @@ Wszystkie trasy `/api/*` poza rejestracją i logowaniem wymagają nagłówka `Au
 | Metoda i ścieżka | Opis |
 |---|---|
 | POST `/api/auth/register`, `/api/auth/login`, `/api/auth/logout` | konto i sesja |
+| POST `/api/auth/logout-all` | wylogowanie ze wszystkich urządzeń (zamyka też wszystkie WebSockety użytkownika) |
+| POST `/api/ws-ticket` | jednorazowy bilet do WebSocket (ważny 30 s) |
+| GET `/api/me/storage` | `{usedBytes, quotaBytes}` — zajęte miejsce na pliki |
+| GET `/api/health` | `{ok:true}` bez autoryzacji (healthcheck) |
 | GET/PATCH `/api/me` | profil (displayName, status) |
 | GET `/api/users` | wszyscy użytkownicy |
 | GET `/api/channels`, `/api/channels/browse` | moje kanały i DM / publiczne kanały |
@@ -87,7 +96,7 @@ Wszystkie trasy `/api/*` poza rejestracją i logowaniem wymagają nagłówka `Au
 
 ### WebSocket
 
-Połączenie: `ws://host/ws?token=<token>` (zły token: zamknięcie kodem 4001).
+Połączenie: najpierw `POST /api/ws-ticket` (z nagłówkiem Bearer), potem `ws://host/ws?ticket=<ticket>`. Bilet jest jednorazowy i ważny 30 s; brak, zły, zużyty lub wygasły bilet (a także parametr `token`) powoduje zamknięcie kodem 4001. Wylogowanie lub wygaśnięcie sesji zamyka jej sockety kodem 4001.
 
 | Kierunek | Zdarzenie |
 |---|---|
@@ -101,13 +110,62 @@ Zdarzenia kanałowe trafiają wyłącznie do członków danego kanału.
 Zabezpieczenia:
 
 - limit nieudanych logowań: 10 prób w 10 minut na parę IP + nazwa użytkownika, potem 429 (także dla poprawnego hasła); udane logowanie zeruje licznik; hasła haszowane asynchronicznie (scrypt), maks. 200 znaków
+- sesje: w bazie leży tylko `SHA-256(token)`; ważność przesuwana (`SESSION_TTL_DAYS`, zapis do bazy najwyżej raz na godzinę), wygasłe sesje są sprzątane; `logout-all` kończy wszystkie sesje użytkownika
+- WebSocket bez tokenu w URL: jednorazowe bilety (30 s, tylko w pamięci serwera); heartbeat (ping co 30 s), limit ramki 16 KB, zamykanie socketów wygasłych lub wylogowanych sesji
+- pliki: kwota na użytkownika (`UPLOAD_QUOTA_MB`, 413 po przekroczeniu); usunięcie wiadomości usuwa jej załącznik; pliki-sieroty starsze niż 24 h są sprzątane przy starcie i co godzinę
 - Content-Security-Policy (`script-src 'self'`, `frame-ancestors 'none'` itd.), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`; pliki użytkowników są serwowane z własnym CSP `sandbox`
-- heartbeat WebSocket (ping co 30 s, brak odpowiedzi = zamknięcie połączenia), limit ramki 16 KB, wylogowanie zamyka otwarte połączenia WS tego tokenu
 - limit JSON 100 kB (8 MB tylko dla wysyłania plików)
+- graceful shutdown na SIGTERM/SIGINT; `GET /api/health` do healthchecków
 
-Znane ograniczenia (poza zakresem tej wersji):
+Znane ograniczenia:
 
-- brak kwoty plików na użytkownika i sprzątania plików-sierot (usunięta wiadomość nie usuwa pliku); w produkcji: limit dysku na konto i okresowe sprzątanie
-- sesje nie wygasają, a tokeny leżą w bazie jawnym tekstem; w produkcji: przechowywać `sha256(token)` i dodać TTL
-- token w adresie URL WebSocket (`/ws?token=`) może trafić do logów proxy; w produkcji: jednorazowy bilet lub wiadomość `auth` po połączeniu
-- limiter logowań działa w pamięci jednego procesu (nie przeżywa restartu ani nie działa między instancjami)
+- limiter logowań i bilety WebSocket działają w pamięci jednego procesu (nie przeżywają restartu ani nie działają między instancjami)
+- aplikacja nie terminuje HTTPS — w internecie uruchamiaj ją za reverse proxy z TLS (i ustaw `TRUST_PROXY`)
+
+## Docker
+
+Gotowy obraz zawiera aplikację z domyślnymi ustawieniami produkcyjnymi: dane (baza i załączniki) w wolumenie `/data`, działa jako użytkownik `node`, konta demo wyłączone (`SEED=false`), healthcheck na `/api/health`.
+
+### Uruchomienie
+
+```
+docker compose up -d --build
+```
+
+Aplikacja jest dostępna na `http://localhost:3000` (port jest domyślnie przypięty tylko do `127.0.0.1` — publicznie udostępniaj ją przez reverse proxy z TLS).
+
+### Wersja z HTTPS (Caddy)
+
+```
+cp deploy/Caddyfile.example deploy/Caddyfile
+DOMAIN=czat.firma.pl docker compose --profile https up -d --build
+```
+
+Wymagania: domena wskazuje na serwer, porty 80 i 443 (TCP i UDP dla HTTP/3) są otwarte. Caddy sam pobiera i odnawia certyfikat.
+
+### Pierwsze konto
+
+Konta demo są wyłączone (`SEED=false`). Pierwsze konto utwórz przez rejestrację w przeglądarce.
+
+### Kopia zapasowa
+
+```
+docker run --rm -v kanalik_kanalik-data:/data -v "$PWD":/backup alpine tar czf /backup/kanalik-backup.tgz -C /data .
+```
+
+Nazwa wolumenu to `<katalog projektu>_kanalik-data` (sprawdź: `docker volume ls`). Dla spójnej kopii zatrzymaj wcześniej aplikację (`docker compose stop kanalik`).
+
+### Aktualizacja
+
+```
+git pull
+docker compose up -d --build
+```
+
+Dane w wolumenie `kanalik-data` zostają zachowane.
+
+### Logi
+
+```
+docker compose logs -f kanalik
+```

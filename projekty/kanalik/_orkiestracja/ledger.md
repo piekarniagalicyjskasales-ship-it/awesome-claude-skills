@@ -49,7 +49,8 @@ D2 kwota plików / sprzątanie sierot; D5 wygasanie sesji, tokeny jawne w bazie;
 
 | Zadanie | Status | Plik | Uwagi |
 |---|---|---|---|
-| R2-B Backend | W TOKU (fala A) | src/, server.js, README | wznowiony T1 |
-| R2-F Frontend | W TOKU (fala A) | public/ | wznowiony T2 |
-| R2-T Testy | W TOKU (fala A) | tests/ | wznowiony T3 |
-| R2-D Docker | CZEKA (fala B, po R2-B) | Dockerfile, compose, deploy/ | briefs/R2-D.md |
+| R2-B Backend | DONE | src/, server.js, README | migracja starej bazy OK; dodatkowo: wygasłe sesje zamykają WS w heartbeat |
+| R2-F Frontend | DONE → diagnoza flaky | public/ | bilety WS, storage, logout-all; E2E 1/3 FAIL scen. 12 (B nie dostał wiadomości w 3 s) — wznowiony T2 do diagnozy |
+| R2-T Testy | DONE | tests/ | 84/84 ×2 (kontroler) |
+| R2-D Docker | W TOKU (fala B) | Dockerfile, compose, deploy/ | sonnet, port 3400 |
+| R2-REV Recenzja R2 | W TOKU (fala B) | out/R2-REV.md | opus, port 3500 |

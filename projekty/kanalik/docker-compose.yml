@@ -1,0 +1,36 @@
+services:
+  kanalik:
+    build: .
+    image: kanalik:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - kanalik-data:/data
+    environment:
+      TRUST_PROXY: "1"
+      SESSION_TTL_DAYS: "30"
+      UPLOAD_QUOTA_MB: "100"
+      SEED: "${SEED:-false}"
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: "${DOMAIN:?ustaw DOMAIN, np. DOMAIN=czat.firma.pl}"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - kanalik
+
+volumes:
+  kanalik-data:
+  caddy-data:
+  caddy-config:

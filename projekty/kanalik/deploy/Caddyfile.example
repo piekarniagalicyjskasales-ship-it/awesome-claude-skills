@@ -1,0 +1,9 @@
+# Skopiuj ten plik do deploy/Caddyfile i uruchom z ustawioną zmienną DOMAIN:
+#   cp deploy/Caddyfile.example deploy/Caddyfile
+#   DOMAIN=czat.firma.pl docker compose --profile https up -d --build
+# Domena musi wskazywać na ten serwer, a porty 80/443 muszą być otwarte
+# (Caddy sam pobierze i odnowi certyfikat TLS). WebSocket działa automatycznie.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy kanalik:3000
+}

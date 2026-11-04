@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { hashPasswordAsync, verifyPasswordAsync, verifyDummy, createLoginLimiter, newToken } = require('./auth');
+const { hashPasswordAsync, verifyPasswordAsync, verifyDummy, createLoginLimiter, newToken, hashToken } = require('./auth');
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -26,7 +26,7 @@ function parseId(v) {
 }
 const now = () => new Date().toISOString();
 
-function createRouter({ m, rt, db, uploadsDir }) {
+function createRouter({ m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, removeFile }) {
   const api = express.Router();
   const limiter = createLoginLimiter();
 
@@ -37,24 +37,42 @@ function createRouter({ m, rt, db, uploadsDir }) {
   }
 
   // ---------- Auth ----------
+  const HOUR = 3600 * 1000;
   function auth(req, res, next) {
     const h = req.headers.authorization || '';
     const mt = /^Bearer\s+([a-f0-9]{64})$/i.exec(h);
-    const row = mt
-      ? m.get('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?', mt[1].toLowerCase())
+    const tokenHash = mt ? hashToken(mt[1].toLowerCase()) : null;
+    const row = tokenHash
+      ? m.get(`SELECT u.*, s.expires_at AS s_expires, s.last_used_at AS s_last FROM sessions s
+               JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?`, tokenHash)
       : null;
+    const t = Date.now();
     if (!row) return next(new HttpError(401, 'Wymagane zalogowanie'));
+    if (row.s_expires < t) {
+      m.run('DELETE FROM sessions WHERE token_hash = ?', tokenHash);
+      return next(new HttpError(401, 'Sesja wygasła'));
+    }
+    if (t - row.s_last > HOUR) {
+      m.run('UPDATE sessions SET expires_at = ?, last_used_at = ? WHERE token_hash = ?', t + sessionTtlMs, t, tokenHash);
+    }
     req.userRow = row;
     req.me = row.id;
-    req.token = mt[1].toLowerCase();
+    req.tokenHash = tokenHash;
     next();
   }
 
   function createSession(userId) {
     const token = newToken();
-    m.run('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)', token, userId, now());
+    const t = Date.now();
+    m.run('INSERT INTO sessions (token_hash, user_id, created_at, expires_at, last_used_at) VALUES (?, ?, ?, ?, ?)',
+      hashToken(token), userId, t, t + sessionTtlMs, t);
     return token;
   }
+
+  api.get('/health', (req, res) => {
+    m.get('SELECT 1');
+    res.json({ ok: true });
+  });
 
   api.post('/auth/register', async (req, res, next) => {
    try {
@@ -110,10 +128,21 @@ function createRouter({ m, rt, db, uploadsDir }) {
   api.use(auth);
 
   api.post('/auth/logout', (req, res) => {
-    m.run('DELETE FROM sessions WHERE token = ?', req.token);
-    rt.dropToken(req.token);
+    m.run('DELETE FROM sessions WHERE token_hash = ?', req.tokenHash);
+    rt.dropSession(req.tokenHash);
     res.json({ ok: true });
   });
+
+  api.post('/auth/logout-all', (req, res) => {
+    m.run('DELETE FROM sessions WHERE user_id = ?', req.me);
+    rt.dropUser(req.me);
+    res.json({ ok: true });
+  });
+
+  api.post('/ws-ticket', (req, res) => res.json({ ticket: rt.createTicket(req.me, req.tokenHash) }));
+
+  const usedBytes = (uid) => m.get('SELECT COALESCE(SUM(size), 0) AS s FROM files WHERE user_id = ?', uid).s;
+  api.get('/me/storage', (req, res) => res.json({ usedBytes: usedBytes(req.me), quotaBytes: uploadQuotaBytes }));
 
   api.get('/me', (req, res) => res.json({ user: m.getUser(req.me) }));
 
@@ -356,6 +385,10 @@ function createRouter({ m, rt, db, uploadsDir }) {
     if (msg.user_id !== req.me) throw forbidden('Możesz usuwać tylko własne wiadomości');
     if (!msg.deleted) {
       m.run('UPDATE messages SET deleted = 1 WHERE id = ?', msg.id);
+      if (msg.file_id) {
+        const other = m.get('SELECT 1 FROM messages WHERE file_id = ? AND id != ? AND deleted = 0', msg.file_id, msg.id);
+        if (!other) removeFile(msg.file_id);
+      }
       emitUpdated(msg);
     }
     res.json({ ok: true });
@@ -412,9 +445,15 @@ function createRouter({ m, rt, db, uploadsDir }) {
     const buf = Buffer.from(data, 'base64');
     if (buf.length === 0) throw bad('Plik jest pusty');
     if (buf.length > MAX_FILE) throw new HttpError(413, 'Plik jest za duży (maks. 5 MB)');
+    if (usedBytes(req.me) + buf.length > uploadQuotaBytes)
+      throw new HttpError(413, 'Przekroczono limit miejsca na pliki');
     const id = crypto.randomBytes(16).toString('hex');
     await fsp.mkdir(uploadsDir, { recursive: true });
     await fsp.writeFile(path.join(uploadsDir, id), buf);
+    if (usedBytes(req.me) + buf.length > uploadQuotaBytes) {
+      await fsp.unlink(path.join(uploadsDir, id)).catch(() => {});
+      throw new HttpError(413, 'Przekroczono limit miejsca na pliki');
+    }
     m.run('INSERT INTO files (id, name, mime, size, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       id, cleanName, mime, buf.length, req.me, now());
     res.status(201).json({ file: m.fileOut(m.get('SELECT * FROM files WHERE id = ?', id)) });

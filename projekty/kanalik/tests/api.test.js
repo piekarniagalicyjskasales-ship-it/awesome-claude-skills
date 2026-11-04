@@ -29,11 +29,11 @@ after(async () => {
 });
 
 // ---------- helpers ----------
-async function api(method, p, body, token) {
+async function api(method, p, body, token, baseUrl = base) {
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers['Authorization'] = 'Bearer ' + token;
-  const res = await fetch(base + p, {
+  const res = await fetch(baseUrl + p, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -69,9 +69,20 @@ async function send(token, channelId, text, extra = {}) {
   return r.body.message;
 }
 
-function connectWs(token) {
+async function getTicket(token, baseUrl = base) {
+  const r = await api('POST', '/api/ws-ticket', undefined, token, baseUrl);
+  assert.equal(r.status, 200, 'ws-ticket failed: ' + JSON.stringify(r.body));
+  return r.body.ticket;
+}
+
+async function connectWs(token) {
+  const ticket = await getTicket(token);
+  return connectWsTicket(ticket);
+}
+
+function connectWsTicket(ticket, baseUrl = base) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws?token=${encodeURIComponent(token)}`);
+    const ws = new WebSocket(`${baseUrl.replace('http', 'ws')}/ws?ticket=${encodeURIComponent(ticket)}`);
     const buffer = [];
     const waiters = [];
     let closeInfo = null;
@@ -122,13 +133,46 @@ function connectWs(token) {
   });
 }
 
-function waitForClose(token) {
+// otwiera /ws z dowolnym query string i zwraca kod zamknięcia
+function waitForCloseQuery(query, baseUrl = base) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws?token=${encodeURIComponent(token)}`);
+    const ws = new WebSocket(`${baseUrl.replace('http', 'ws')}/ws${query}`);
     const timer = setTimeout(() => reject(new Error('close timeout')), 3000);
     ws.on('close', (code) => { clearTimeout(timer); resolve(code); });
     ws.on('error', () => {});
   });
+}
+
+// osobna instancja serwera (własne tmp), zwraca {srv, url, dir, dbPath, api, close}
+async function startInstance(opts = {}) {
+  const { start } = require('../src/app');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kanalik-r2-'));
+  const dbPath = path.join(dir, 'test.db');
+  const srv = await start({
+    port: 0,
+    dbPath,
+    uploadsDir: path.join(dir, 'uploads'),
+    seed: false,
+    ...opts,
+  });
+  const url = `http://127.0.0.1:${srv.port}`;
+  let closed = false;
+  return {
+    srv, url, dir, dbPath,
+    api: (method, p, body, token) => api(method, p, body, token, url),
+    async register(name) {
+      const username = uniq(name || 'u');
+      const r = await api('POST', '/api/auth/register', { username, password: 'haslo123' }, undefined, url);
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      return { username, token: r.body.token, user: r.body.user, id: r.body.user.id };
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      await srv.close();
+    },
+    cleanup() { fs.rmSync(dir, { recursive: true, force: true }); },
+  };
 }
 
 // ---------- 1. Rejestracja ----------
@@ -811,7 +855,7 @@ test('pliki: wiadomość z fileId ma file (także z pustym tekstem)', async () =
 
 // ---------- 12. WebSocket ----------
 test('ws: zły token -> zamknięcie 4001', async () => {
-  const code = await waitForClose('zlytoken');
+  const code = await waitForCloseQuery('?ticket=zlybilet');
   assert.equal(code, 4001);
 });
 
@@ -1209,4 +1253,193 @@ test('R1 D18: /read z ogromnym id nie psuje licznika nieprzeczytanych', async ()
   await send(b.token, ch.id, 'nowa');
   const c = (await api('GET', '/api/channels', undefined, a.token)).body.channels.find((x) => x.id === ch.id);
   assert.equal(c.unreadCount, 1);
+});
+
+// ======================= R2: KONTRAKT v2 =======================
+const crypto = require('node:crypto');
+
+test('R2 D11: POST /api/ws-ticket bez auth -> 401; z auth -> 64 znaki hex', async () => {
+  assert.equal((await api('POST', '/api/ws-ticket')).status, 401);
+  const a = await register('t1');
+  const r = await api('POST', '/api/ws-ticket', undefined, a.token);
+  assert.equal(r.status, 200);
+  assert.match(r.body.ticket, /^[0-9a-f]{64}$/);
+  const r2 = await api('POST', '/api/ws-ticket', undefined, a.token);
+  assert.notEqual(r2.body.ticket, r.body.ticket);
+});
+
+test('R2 D11: bilet jest jednorazowy (drugie użycie -> 4001)', async () => {
+  const a = await register('t2');
+  const ticket = await getTicket(a.token);
+  const c = await connectWsTicket(ticket);
+  try {
+    const hello = await c.waitFor((m) => m.type === 'hello');
+    assert.equal(hello.user.id, a.id);
+    const code = await waitForCloseQuery('?ticket=' + ticket);
+    assert.equal(code, 4001);
+  } finally { await c.close(); }
+});
+
+test('R2 D11: ?token= nie jest już akceptowany -> 4001', async () => {
+  const a = await register('t3');
+  assert.equal(await waitForCloseQuery('?token=' + a.token), 4001);
+});
+
+test('R2 D11: brak biletu / nieznany bilet -> 4001', async () => {
+  assert.equal(await waitForCloseQuery(''), 4001);
+  assert.equal(await waitForCloseQuery('?ticket='), 4001);
+  assert.equal(await waitForCloseQuery('?ticket=' + 'ab'.repeat(32)), 4001);
+});
+
+test('R2 D11: bilet wystawiony na sesję zamkniętą przez logout nie działa', async () => {
+  const a = await register('t4');
+  const ticket = await getTicket(a.token);
+  await api('POST', '/api/auth/logout', undefined, a.token);
+  assert.equal(await waitForCloseQuery('?ticket=' + ticket), 4001);
+});
+
+test('R2 D5: wygasła sesja -> 401 (sessionTtlMs)', async () => {
+  const inst = await startInstance({ sessionTtlMs: 300 });
+  try {
+    const u = await inst.register('exp');
+    assert.equal((await inst.api('GET', '/api/me', undefined, u.token)).status, 200);
+    await new Promise((r) => setTimeout(r, 800));
+    const r = await inst.api('GET', '/api/me', undefined, u.token);
+    assert.equal(r.status, 401);
+    // ponowne logowanie działa
+    const login = await inst.api('POST', '/api/auth/login', { username: u.username, password: 'haslo123' });
+    assert.equal(login.status, 200);
+  } finally { await inst.close(); inst.cleanup(); }
+});
+
+test('R2 D5: w bazie nie ma jawnego tokenu, tylko SHA-256 (token_hash)', async () => {
+  const inst = await startInstance();
+  let tokens;
+  try {
+    const u = await inst.register('hash');
+    const login = await inst.api('POST', '/api/auth/login', { username: u.username, password: 'haslo123' });
+    tokens = [u.token, login.body.token];
+  } finally { await inst.close(); }
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(inst.dbPath, { readOnly: true });
+    const rows = db.prepare('SELECT * FROM sessions').all();
+    const cols = Object.keys(rows[0] || {});
+    db.close();
+    assert.ok(rows.length >= 2);
+    for (const c of ['token_hash', 'user_id', 'created_at', 'expires_at', 'last_used_at']) {
+      assert.ok(cols.includes(c), 'brak kolumny ' + c + ' (są: ' + cols + ')');
+    }
+    assert.ok(!cols.includes('token'), 'kolumna z jawnym tokenem nie powinna istnieć');
+    const dump = JSON.stringify(rows);
+    for (const t of tokens) {
+      assert.ok(!dump.includes(t), 'jawny token w tabeli sessions');
+      const h = crypto.createHash('sha256').update(t).digest('hex');
+      assert.ok(rows.some((r) => r.token_hash === h), 'brak SHA-256(token) w token_hash');
+    }
+  } finally { inst.cleanup(); }
+});
+
+test('R2 D5: logout-all unieważnia wszystkie sesje i zamyka sockety 4001', async () => {
+  const a = await register('lo');
+  const other = await register('lo2');
+  const login = await api('POST', '/api/auth/login', { username: a.username, password: 'haslo123' });
+  const token2 = login.body.token;
+  assert.notEqual(token2, a.token);
+  const c1 = await connectWs(a.token);
+  const c2 = await connectWs(token2);
+  const co = await connectWs(other.token);
+  try {
+    await Promise.all([c1, c2, co].map((c) => c.waitFor((m) => m.type === 'hello')));
+    const closing = [c1, c2].map((c) => new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('socket nie zamknięty')), 3000);
+      c.ws.once('close', (code) => { clearTimeout(t); resolve(code); });
+    }));
+    assert.equal((await api('POST', '/api/auth/logout-all')).status, 401);
+    const r = await api('POST', '/api/auth/logout-all', undefined, a.token);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    assert.deepEqual(await Promise.all(closing), [4001, 4001]);
+    assert.equal((await api('GET', '/api/me', undefined, a.token)).status, 401);
+    assert.equal((await api('GET', '/api/me', undefined, token2)).status, 401);
+    assert.equal((await api('GET', '/api/me', undefined, other.token)).status, 200);
+    assert.equal(co.ws.readyState, WebSocket.OPEN);
+  } finally { await Promise.all([c1.close(), c2.close(), co.close()]); }
+});
+
+test('R2 D2: GET /api/me/storage (usedBytes, quotaBytes)', async () => {
+  const a = await register('stg');
+  assert.equal((await api('GET', '/api/me/storage')).status, 401);
+  const r0 = await api('GET', '/api/me/storage', undefined, a.token);
+  assert.equal(r0.status, 200);
+  assert.equal(r0.body.usedBytes, 0);
+  assert.equal(typeof r0.body.quotaBytes, 'number');
+  assert.ok(r0.body.quotaBytes > 0);
+  const bytes = Buffer.from(PNG_BASE64, 'base64').length;
+  await api('POST', '/api/files', { name: 'p.png', mime: 'image/png', dataBase64: PNG_BASE64 }, a.token);
+  const r1 = await api('GET', '/api/me/storage', undefined, a.token);
+  assert.equal(r1.body.usedBytes, bytes);
+});
+
+test('R2 D2: kwota na użytkownika -> 413 z komunikatem', async () => {
+  const inst = await startInstance({ uploadQuotaBytes: 1000 });
+  try {
+    const a = await inst.register('q1');
+    const b = await inst.register('q2');
+    const chunk = Buffer.alloc(600, 7).toString('base64');
+    const up = (t) => inst.api('POST', '/api/files', { name: 'a.bin', mime: 'application/octet-stream', dataBase64: chunk }, t);
+    assert.equal((await up(a.token)).status, 201);
+    const over = await up(a.token);
+    assert.equal(over.status, 413);
+    assert.equal(over.body.error, 'Przekroczono limit miejsca na pliki');
+    const st = await inst.api('GET', '/api/me/storage', undefined, a.token);
+    assert.deepEqual(st.body, { usedBytes: 600, quotaBytes: 1000 });
+    // kwota jest per użytkownik
+    assert.equal((await up(b.token)).status, 201);
+  } finally { await inst.close(); inst.cleanup(); }
+});
+
+test('R2 D2: usunięcie wiadomości z plikiem usuwa plik (GET -> 404) i zwalnia miejsce', async () => {
+  const a = await register('dfa');
+  const ch = await createChannel(a.token);
+  const up = await api('POST', '/api/files', { name: 'p.png', mime: 'image/png', dataBase64: PNG_BASE64 }, a.token);
+  const m = await send(a.token, ch.id, 'z plikiem', { fileId: up.body.file.id });
+  const before = await fetch(base + m.file.url);
+  assert.equal(before.status, 200);
+  await before.arrayBuffer();
+  assert.equal((await api('DELETE', `/api/messages/${m.id}`, undefined, a.token)).status, 200);
+  const after = await fetch(base + m.file.url);
+  assert.equal(after.status, 404);
+  await after.arrayBuffer();
+  const st = await api('GET', '/api/me/storage', undefined, a.token);
+  assert.equal(st.body.usedBytes, 0);
+});
+
+test('R2 D2: cleanupOrphans() usuwa nieprzypięty plik, zostawia przypięty', async () => {
+  const inst = await startInstance({ orphanMaxAgeMs: 0 });
+  try {
+    assert.equal(typeof inst.srv.cleanupOrphans, 'function');
+    const a = await inst.register('orp');
+    const ch = (await inst.api('POST', '/api/channels', { name: uniq('orph') }, a.token)).body.channel;
+    const mk = async () => (await inst.api('POST', '/api/files', { name: 'p.png', mime: 'image/png', dataBase64: PNG_BASE64 }, a.token)).body.file;
+    const orphan = await mk();
+    const pinned = await mk();
+    const msg = await inst.api('POST', `/api/channels/${ch.id}/messages`, { text: 'x', fileId: pinned.id }, a.token);
+    assert.equal(msg.status, 201);
+    await new Promise((r) => setTimeout(r, 30));
+    const removed = await inst.srv.cleanupOrphans();
+    assert.ok(removed >= 1, 'removed=' + removed);
+    const o = await fetch(inst.url + orphan.url);
+    assert.equal(o.status, 404);
+    await o.arrayBuffer();
+    const p = await fetch(inst.url + pinned.url);
+    assert.equal(p.status, 200);
+    await p.arrayBuffer();
+  } finally { await inst.close(); inst.cleanup(); }
+});
+
+test('R2: /api/health 200 {ok:true} bez autoryzacji', async () => {
+  const res = await fetch(base + '/api/health');
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
 });

@@ -2,6 +2,7 @@
 const express = require('express');
 const http = require('node:http');
 const fs = require('node:fs');
+const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { openDb } = require('./db');
 const { createModels } = require('./models');
@@ -9,7 +10,14 @@ const { createRealtime } = require('./realtime');
 const { createRouter, HttpError } = require('./routes');
 const { seed, ensureDefaultChannels } = require('./seed');
 
-async function start({ port = 3000, dbPath = './data/kanalik.db', uploadsDir = './data/uploads', seed: doSeed = true } = {}) {
+const DAY = 24 * 3600 * 1000;
+
+async function start({
+  port = 3000, host, dbPath = './data/kanalik.db', uploadsDir = './data/uploads', seed: doSeed = true,
+  sessionTtlMs, uploadQuotaBytes, orphanMaxAgeMs = DAY, trustProxy,
+} = {}) {
+  if (sessionTtlMs === undefined) sessionTtlMs = (Number(process.env.SESSION_TTL_DAYS) || 30) * DAY;
+  if (uploadQuotaBytes === undefined) uploadQuotaBytes = (Number(process.env.UPLOAD_QUOTA_MB) || 100) * 1024 * 1024;
   fs.mkdirSync(uploadsDir, { recursive: true });
   const db = openDb(dbPath);
   ensureDefaultChannels(db);
@@ -17,12 +25,38 @@ async function start({ port = 3000, dbPath = './data/kanalik.db', uploadsDir = '
 
   const app = express();
   app.disable('x-powered-by');
+  if (trustProxy !== undefined && trustProxy !== null && trustProxy !== '') app.set('trust proxy', trustProxy);
   const server = http.createServer(app);
 
   let rt = null;
   const m = createModels(db, (id) => (rt ? rt.isOnline(id) : false));
   rt = createRealtime({ server, m });
-  const { api, serveFile } = createRouter({ m, rt, db, uploadsDir });
+
+  const removeFile = (id) => {
+    m.run('DELETE FROM files WHERE id = ?', id);
+    fsp.unlink(path.join(uploadsDir, id)).catch(() => {});
+  };
+  // Pliki-sieroty (bez wiadomości) starsze niż orphanMaxAgeMs.
+  async function cleanupOrphans() {
+    const cutoff = new Date(Date.now() - orphanMaxAgeMs).toISOString();
+    const rows = m.all(
+      `SELECT id FROM files f WHERE created_at <= ?
+       AND NOT EXISTS (SELECT 1 FROM messages WHERE file_id = f.id)`, cutoff);
+    for (const r of rows) {
+      m.run('DELETE FROM files WHERE id = ?', r.id);
+      await fsp.unlink(path.join(uploadsDir, r.id)).catch(() => {});
+    }
+    return rows.length;
+  }
+  const housekeeping = () => {
+    try { m.run('DELETE FROM sessions WHERE expires_at < ?', Date.now()); } catch { /* baza zamknięta */ }
+    return cleanupOrphans().catch((e) => console.error('Sprzątanie plików:', e));
+  };
+  await housekeeping();
+  const hkTimer = setInterval(housekeeping, 3600 * 1000);
+  hkTimer.unref();
+
+  const { api, serveFile } = createRouter({ m, rt, db, uploadsDir, sessionTtlMs, uploadQuotaBytes, removeFile });
 
   app.use((req, res, next) => {
     res.setHeader('Content-Security-Policy',
@@ -54,13 +88,14 @@ async function start({ port = 3000, dbPath = './data/kanalik.db', uploadsDir = '
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, resolve);
+    if (host) server.listen(port, host, resolve); else server.listen(port, resolve);
   });
 
   let closed = null;
   function close() {
     if (closed) return closed;
     closed = (async () => {
+      clearInterval(hkTimer);
       await rt.close();
       await new Promise((resolve) => {
         server.close(() => resolve());
@@ -71,7 +106,7 @@ async function start({ port = 3000, dbPath = './data/kanalik.db', uploadsDir = '
     return closed;
   }
 
-  return { port: server.address().port, close };
+  return { port: server.address().port, close, cleanupOrphans };
 }
 
 module.exports = { start };
